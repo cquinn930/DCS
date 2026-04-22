@@ -1,0 +1,79 @@
+${tenant_legal_name}
+${tenant_address}
+${tenant_phone}
+${tenant_email}
+
+${today_date}
+
+To: ${consumer_full_name}
+    ${consumer_address}
+
+Re: Reference number ${account_reference}
+    Account number ending in ${account_number_last_four}
+
+NOTICE OF DEBT — YOUR RIGHT TO DISPUTE
+
+This notice is required by federal law (12 C.F.R. § 1006.34). It contains
+important information about a debt. You may dispute this debt or request
+the name and address of the original creditor. Read it carefully.
+
+Information about the debt
+--------------------------
+Our information shows:
+
+  You had an account with ${original_creditor_name}.
+  This debt is currently owed to ${current_creditor_name}.
+
+  As of ${validation_period_start}, you owed:    ${itemization_principal_formatted}
+
+  Between ${validation_period_start} and ${today_date},
+  you were charged this amount in interest:       ${itemization_interest_formatted}
+  you were charged this amount in fees:           ${itemization_fees_formatted}
+  you paid or were credited this amount:         -${itemization_payments_formatted}
+  you received this amount in other credits:    -${itemization_credits_formatted}
+                                                  -----------------------
+  Total amount of the debt now:                   ${current_balance_formatted}
+
+How can you dispute the debt?
+-----------------------------
+  - Call or write to us by ${dispute_deadline_date} to dispute all or part
+    of the debt. If you do not, we will assume that our information is
+    correct.
+  - If you write to us by ${dispute_deadline_date}, we must stop collection
+    on any amount you dispute until we send you information that shows you
+    owe the debt.
+
+You may use the form below or write to us in your own words. You can also:
+
+  Call:  ${tenant_phone}
+  Email: ${tenant_email}
+  Mail:  ${tenant_address}
+
+What else can you do?
+---------------------
+  - Write to ask for the name and address of the original creditor, if
+    different from the current creditor. If you write by ${dispute_deadline_date},
+    we must stop collection until we send you that information.
+  - Learn more about your rights under federal law. For more information,
+    visit www.cfpb.gov/debt-collection.
+  - Contact us about your payment options.
+
+State disclosure (New Jersey)
+-----------------------------
+${state_disclosure}
+
+------------------------------ DISPUTE FORM ------------------------------
+I want to dispute the debt because I think:
+
+  [ ] This is not my debt.
+  [ ] The amount is wrong.
+  [ ] Other (please describe on the back or below):
+      ____________________________________________________________________
+      ____________________________________________________________________
+
+Mail this form to: ${tenant_address}
+
+This is provided pursuant to 12 C.F.R. § 1006.34 (Reg F validation
+information requirements) and Appendix B Model Form B-3. Non-legal
+guidance: this notice is for informational compliance with federal law and
+is not legal advice.

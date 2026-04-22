@@ -1,0 +1,29 @@
+${tenant_legal_name}
+${tenant_address}
+${tenant_phone}
+
+${today_date}
+
+To: ${consumer_full_name}
+
+Re: Account with ${current_creditor_name}
+    Current balance: ${current_balance_formatted}
+
+This communication is from a debt collector. This is an attempt to collect a
+debt and any information obtained will be used for that purpose.
+${miniranda_disclosure}
+
+We are writing because our records indicate that the above-referenced account
+has an outstanding balance owed to ${current_creditor_name}.
+
+A separate written notice (the "validation notice") will be provided to you
+that explains your rights to dispute this debt and to request information
+about the original creditor. Federal law requires us to send that notice
+within five (5) days of this initial communication.
+
+If you would like to discuss the account, you may reach us at
+${tenant_phone} during our regular business hours.
+
+This notice is provided pursuant to 15 U.S.C. § 1692e(11) and 12 C.F.R.
+§ 1006.18(e). Non-legal guidance: nothing in this notice constitutes legal
+advice; consult an attorney for guidance on your rights and obligations.

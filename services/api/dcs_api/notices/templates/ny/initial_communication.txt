@@ -1,0 +1,36 @@
+${tenant_legal_name}
+${tenant_address}
+${tenant_phone}
+
+${today_date}
+
+To: ${consumer_full_name}
+
+Re: Account with ${current_creditor_name}
+    Current balance: ${current_balance_formatted}
+
+This communication is from a debt collector. This is an attempt to collect a
+debt and any information obtained will be used for that purpose.
+${miniranda_disclosure}
+
+A separate written notice (the "validation notice") will follow within five
+(5) days that explains your rights to dispute this debt and to request the
+name and address of the original creditor (15 U.S.C. § 1692g; 12 C.F.R.
+§ 1006.34).
+
+Your rights under New York law
+------------------------------
+If this debt is for a "consumer credit transaction" as defined in N.Y.
+C.P.L.R. § 105(f), the statute of limitations for a creditor or debt
+collector to sue you to collect the debt is three (3) years. Even if the
+statute of limitations has expired, the debt may still be valid; however,
+the law generally bars us from suing you to collect it (N.Y. C.P.L.R.
+§ 214-i, the Consumer Credit Fairness Act, effective Apr. 7, 2022).
+
+If you would like to discuss the account, you may reach us at
+${tenant_phone}.
+
+This notice is provided pursuant to 15 U.S.C. § 1692e(11), 12 C.F.R.
+§ 1006.18(e), and N.Y. Gen. Bus. Law Art. 29-H. Non-legal guidance:
+nothing in this notice constitutes legal advice; consult an attorney for
+guidance on your rights.

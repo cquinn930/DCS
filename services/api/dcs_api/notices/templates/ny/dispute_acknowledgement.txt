@@ -1,0 +1,41 @@
+${tenant_legal_name}
+${tenant_address}
+${tenant_phone}
+
+${today_date}
+
+To: ${consumer_full_name}
+    ${consumer_address}
+
+Re: Dispute received ${dispute_received_date}
+
+We are writing to confirm that we received your dispute on
+${dispute_received_date}. The dispute concerns the following:
+
+${dispute_summary}
+
+What happens next
+-----------------
+Federal law (15 U.S.C. § 1692g(b); 12 C.F.R. § 1006.38(d)) and New York's
+debt-collection regulations (N.Y. Gen. Bus. Law Art. 29-H) require us to
+cease collection of the disputed amount until we mail you verification of
+the debt. We will respond within ${verification_window_days} days.
+
+While the dispute is open, we will not:
+  - request payment on the disputed amount; or
+  - report the disputed amount as delinquent to consumer reporting
+    agencies until we have completed verification.
+
+If you have additional information you would like us to consider, please
+send it to:
+
+  ${tenant_address}
+  or call ${tenant_phone}.
+
+Next steps for you
+------------------
+${next_steps}
+
+Provided pursuant to 15 U.S.C. § 1692g(b), 12 C.F.R. § 1006.38(d), and
+N.Y. Gen. Bus. Law Art. 29-H. Non-legal guidance: this is informational
+compliance and is not legal advice.

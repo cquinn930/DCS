@@ -1,0 +1,17 @@
+[Unit]
+Description=DCS API (FastAPI/Uvicorn)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=www-data
+Group=dcs
+WorkingDirectory=/opt/sites/DCS/services/api
+Environment=PATH=/opt/sites/DCS/services/api/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/sites/DCS/services/api/venv/bin/uvicorn dcs_api.main:app --host 127.0.0.1 --port 8000 --workers 4
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

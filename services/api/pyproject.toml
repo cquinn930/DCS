@@ -1,0 +1,38 @@
+[project]
+name = "dcs-api"
+version = "0.1.0"
+description = "Debt Collection System API"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "S",      # flake8-bandit (security)
+    "N",      # pep8-naming
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "S101",   # use of assert (ok in tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

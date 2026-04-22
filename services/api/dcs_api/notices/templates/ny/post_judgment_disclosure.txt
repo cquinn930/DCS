@@ -1,0 +1,49 @@
+${tenant_legal_name}
+
+${today_date}
+
+To: ${consumer_full_name}
+
+Re: Judgment in ${court_name}
+    Index / Docket No. ${docket_number}
+    Judgment date: ${judgment_date}
+    Judgment amount: ${judgment_amount_formatted}
+
+POST-JUDGMENT INTEREST DISCLOSURE (NEW YORK)
+
+A money judgment was entered against you on ${judgment_date} in the amount
+of ${judgment_amount_formatted}. Under N.Y. C.P.L.R. § 5004, post-judgment
+interest accrues on that judgment until it is satisfied.
+
+Rate applied
+------------
+For calendar year ${rate_year}, the post-judgment interest rate applied to
+your judgment is ${annual_rate}% per annum (simple interest, actual/365 day
+count).
+
+  - The default statutory rate is 9% per annum (N.Y. C.P.L.R. § 5004(a)).
+  - For judgments arising out of a consumer debt as defined in N.Y.
+    C.P.L.R. § 105(f-1), the rate is reduced to 2% per annum (N.Y.
+    C.P.L.R. § 5004(b), effective Apr. 30, 2022).
+
+Source citation: ${rate_source_citation}
+
+Current balance
+---------------
+  Original judgment amount:        ${judgment_amount_formatted}
+  Current principal:               ${current_principal_formatted}
+  Post-judgment interest accrued:  ${post_judgment_interest_formatted}
+                                   -----------------------
+  Total current balance:           ${current_balance_formatted}
+
+Interest will continue to accrue daily until the judgment is satisfied or
+satisfied of record. Money judgments in New York remain enforceable for
+twenty (20) years (N.Y. C.P.L.R. § 211(b)) and the underlying lien on
+real property is enforceable for ten (10) years (N.Y. C.P.L.R. § 5203).
+
+If you wish to satisfy the judgment, contact us for an updated payoff
+figure.
+
+Provided pursuant to N.Y. C.P.L.R. §§ 5004 and 211(b). Non-legal
+guidance: this is informational and is not legal advice; consult an
+attorney about enforcement of and remedies regarding the judgment.

@@ -1,0 +1,45 @@
+${tenant_legal_name}
+
+${today_date}
+
+To: ${consumer_full_name}
+
+Re: Judgment in ${court_name}
+    Docket No. ${docket_number}
+    Judgment date: ${judgment_date}
+    Judgment amount: ${judgment_amount_formatted}
+
+POST-JUDGMENT INTEREST DISCLOSURE
+
+A money judgment was entered against you on ${judgment_date} in the amount
+of ${judgment_amount_formatted}. Under N.J. Court Rules, R. 4:42-11(a),
+post-judgment interest accrues on that judgment until it is satisfied.
+
+Rate applied
+------------
+For calendar year ${rate_year}, the post-judgment interest rate that
+applies to your judgment is ${annual_rate}% per annum (simple interest,
+actual/365 day count). This rate is published annually by the
+Administrative Office of the Courts as a Notice to the Bar pursuant to
+${rate_source_citation}.
+
+Above-threshold judgments (judgments above the $20,000 Special Civil Part
+limit set by R. 6:1-2(a)(1)) accrue at the published SCP rate plus 2.0%.
+${is_above_threshold}
+
+Current balance
+---------------
+  Original judgment amount:        ${judgment_amount_formatted}
+  Current principal:               ${current_principal_formatted}
+  Post-judgment interest accrued:  ${post_judgment_interest_formatted}
+                                   -----------------------
+  Total current balance:           ${current_balance_formatted}
+
+Interest will continue to accrue daily until the judgment is satisfied.
+
+If you wish to satisfy the judgment, contact us at the address or phone
+number above for an updated payoff figure.
+
+This disclosure is provided under N.J. Court Rules, R. 4:42-11(a). Non-
+legal guidance: nothing in this notice is legal advice; consult an
+attorney about enforcement of and remedies regarding the judgment.

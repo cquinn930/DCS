@@ -1,0 +1,51 @@
+# DCS Local Development Environment
+# Usage: docker-compose up -d
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: dcs-postgres
+    environment:
+      POSTGRES_USER: dcs
+      POSTGRES_PASSWORD: dcs
+      POSTGRES_DB: dcs
+    ports:
+      - "5432:5432"
+    volumes:
+      - dcs_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dcs"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql
+
+  redis:
+    image: redis:7-alpine
+    container_name: dcs-redis
+    command: redis-server --requirepass dcs_redis_dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - dcs_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "dcs_redis_dev", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  dcs_postgres_data:
+  dcs_redis_data:
