@@ -29,7 +29,25 @@ security = HTTPBearer()
 
 
 class CurrentUser:
-    """Current authenticated user context."""
+    """Current authenticated user context.
+
+    For master users, three states are possible:
+
+    - is_master=True, acting_as_master=False:
+        Master is logged in but has not entered any tenant. Only the
+        master control plane (/api/v1/master/*) and a small set of
+        always-allowed endpoints (auth, health, tenant metadata) are
+        accessible. Operational endpoints return 403.
+
+    - is_master=True, acting_as_master=True, acting_can_write=False:
+        Master has entered a tenant in read-only mode. Tenant-scoped
+        queries work and resolve to the impersonated tenant. The
+        write-guard middleware rejects non-GET requests.
+
+    - is_master=True, acting_as_master=True, acting_can_write=True:
+        Same as above but writes are permitted; every mutation is
+        audited with master_user_id + impersonation_id.
+    """
 
     def __init__(
         self,
@@ -40,6 +58,11 @@ class CurrentUser:
         permissions: set[str],
         is_owner: bool = False,
         is_master: bool = False,
+        acting_as_master: bool = False,
+        acting_can_write: bool = False,
+        master_user_id: uuid.UUID | None = None,
+        master_tenant_id: uuid.UUID | None = None,
+        impersonation_id: uuid.UUID | None = None,
     ):
         self.user_id = user_id
         self.tenant_id = tenant_id
@@ -48,6 +71,11 @@ class CurrentUser:
         self.permissions = permissions
         self.is_owner = is_owner
         self.is_master = is_master
+        self.acting_as_master = acting_as_master
+        self.acting_can_write = acting_can_write
+        self.master_user_id = master_user_id
+        self.master_tenant_id = master_tenant_id
+        self.impersonation_id = impersonation_id
 
     def has_permission(self, permission: str) -> bool:
         """Check if user has a specific permission."""
@@ -64,6 +92,16 @@ class CurrentUser:
     def has_role(self, role: str) -> bool:
         """Check if user has a specific role."""
         return role in self.roles
+
+
+def _opt_uuid(payload: dict, key: str) -> uuid.UUID | None:
+    val = payload.get(key)
+    if not val:
+        return None
+    try:
+        return uuid.UUID(val)
+    except (ValueError, TypeError):
+        return None
 
 
 async def get_current_user(
@@ -99,11 +137,25 @@ async def get_current_user(
             detail="User not found or inactive",
         )
 
-    if str(user.tenant_id) != payload.get("tenant_id"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token tenant mismatch",
-        )
+    acting_as_master = bool(payload.get("acting_as_master"))
+
+    # For regular tokens, the user's home tenant must match the token's
+    # tenant_id. For impersonation tokens, the token's tenant_id is the
+    # *target* tenant (intentionally different from the master user's
+    # home tenant), and we instead validate against master_tenant_id.
+    if acting_as_master:
+        master_tenant_str = payload.get("master_tenant_id")
+        if not master_tenant_str or str(user.tenant_id) != master_tenant_str:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Impersonation token home-tenant mismatch",
+            )
+    else:
+        if str(user.tenant_id) != payload.get("tenant_id"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token tenant mismatch",
+            )
 
     return CurrentUser(
         user_id=user_id,
@@ -113,7 +165,49 @@ async def get_current_user(
         permissions=set(payload.get("permissions", [])),
         is_owner=payload.get("is_owner", False),
         is_master=payload.get("is_master", False),
+        acting_as_master=acting_as_master,
+        acting_can_write=bool(payload.get("acting_can_write")),
+        master_user_id=_opt_uuid(payload, "master_user_id"),
+        master_tenant_id=_opt_uuid(payload, "master_tenant_id"),
+        impersonation_id=_opt_uuid(payload, "impersonation_id"),
     )
+
+
+async def require_operational_scope(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> CurrentUser:
+    """Block master users who have not entered a tenant.
+
+    Applied via include_router(dependencies=[...]) in main.py to every
+    operational router. Master users see 403 unless they explicitly
+    POST /api/v1/master/impersonate/{slug} first.
+    """
+    if user.is_master and not user.acting_as_master:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Master account must enter a tenant to access operational "
+                "endpoints. POST /api/v1/master/impersonate/{tenant_slug} first."
+            ),
+        )
+    return user
+
+
+async def require_master(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> CurrentUser:
+    """Master control-plane only. Rejects impersonation tokens."""
+    if not user.is_master:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Master account required",
+        )
+    if user.acting_as_master:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Exit impersonation before using the master control plane",
+        )
+    return user
 
 
 def require_permission(permission: str) -> Callable:

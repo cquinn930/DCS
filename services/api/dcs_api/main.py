@@ -7,11 +7,12 @@ but does not guarantee compliance. Consult legal counsel.
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from dcs_api.auth.rbac import require_operational_scope
 from dcs_api.config import get_settings
 from dcs_api.database import engine
 from dcs_api.routers import (
@@ -44,6 +45,7 @@ from dcs_api.routers import (
     judgments,
     litigation,
     masking,
+    master,
     notices,
     payment_plans,
     payments,
@@ -65,6 +67,53 @@ from dcs_api.routers import (
 )
 
 settings = get_settings()
+
+
+class ImpersonationWriteGuardMiddleware(BaseHTTPMiddleware):
+    """Block mutating requests during read-only impersonation.
+
+    Decoded outside the FastAPI dependency graph so we can short-circuit
+    BEFORE the request body is read or any DB work is done. The actual
+    permission model lives in `require_operational_scope` /
+    `require_operational_write`; this middleware is a coarse-grained
+    safety net for write operations during read-only sessions.
+    """
+
+    SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+    # Even during a read-only impersonation, the master must be able to end it.
+    EXEMPT_PATH_PREFIXES = ("/api/v1/master/exit-impersonation",)
+
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        if request.method in self.SAFE_METHODS:
+            return await call_next(request)
+        if any(request.url.path.startswith(p) for p in self.EXEMPT_PATH_PREFIXES):
+            return await call_next(request)
+
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return await call_next(request)
+
+        token = auth_header[7:].strip()
+        from dcs_api.auth.jwt import decode_token
+
+        payload = decode_token(token)
+        if not payload:
+            return await call_next(request)  # let the auth dep produce a clean 401
+
+        if payload.get("acting_as_master") and not payload.get("acting_can_write"):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "Read-only impersonation: this session cannot perform "
+                        "write operations. Re-enter the tenant in 'write' mode "
+                        "(POST /api/v1/master/impersonate/{slug} with mode='write')."
+                    ),
+                    "type": "impersonation_read_only",
+                },
+            )
+
+        return await call_next(request)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -130,6 +179,11 @@ app.add_middleware(
     window_seconds=settings.rate_limit_window_seconds,
 )
 
+# Read-only impersonation guard. Registered AFTER the rate limiter so
+# rate limiting still applies to login attempts. Starlette runs middleware
+# in reverse-add order, so this fires first on inbound, last on outbound.
+app.add_middleware(ImpersonationWriteGuardMiddleware)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -154,54 +208,81 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
-# Include routers
+# ---------------------------------------------------------------------------
+# Router registration
+#
+# Three categories:
+#
+#   1. Public / always-on routers (health, auth, tenants/users self-mgmt,
+#      master control plane). No `require_operational_scope` guard — these
+#      need to work whether or not a master has entered a tenant.
+#
+#   2. Operational routers (everything else). Guarded by
+#      `require_operational_scope`, which 403s any master user holding a
+#      regular (non-impersonation) token. This is what prevents the
+#      "master sees flg's money on the dashboard" bug at the edge,
+#      without having to edit ~40 router files individually.
+#
+# When a master wants to look at a tenant's operational data, they POST
+# /api/v1/master/impersonate/{slug} and swap to the impersonation token
+# returned. That token has acting_as_master=true, so the guard passes,
+# and tenant_id points at the impersonated tenant — so existing
+# tenant-scoped queries Just Work and resolve to the right tenant.
+# ---------------------------------------------------------------------------
+
+OPERATIONAL_GUARD = [Depends(require_operational_scope)]
+
+# 1. Public / always-on
 app.include_router(health.router, tags=["Health"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(tenants.router, prefix="/api/v1/tenants", tags=["Tenants"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
-app.include_router(consumers.router, prefix="/api/v1/consumers", tags=["Consumers"])
-app.include_router(accounts.router, prefix="/api/v1/accounts", tags=["Accounts"])
-app.include_router(cases.router, prefix="/api/v1/cases", tags=["Cases"])
-app.include_router(fees.router, prefix="/api/v1/fees", tags=["Fees"])
-app.include_router(litigation.router, prefix="/api/v1/litigation", tags=["Litigation"])
-app.include_router(notices.router, prefix="/api/v1/notices", tags=["Notices"])
-app.include_router(workflow.router, prefix="/api/v1/workflow", tags=["Workflow"])
-app.include_router(disputes.router, prefix="/api/v1/disputes", tags=["Disputes"])
-app.include_router(payments.router, prefix="/api/v1/payments", tags=["Payments"])
-app.include_router(judgments.router, prefix="/api/v1/judgments", tags=["Judgments"])
-app.include_router(calculations.router, prefix="/api/v1/calculations", tags=["Calculations"])
-app.include_router(compliance.router, prefix="/api/v1/compliance", tags=["Compliance"])
-app.include_router(integrations.router, prefix="/api/v1/integrations", tags=["Integrations"])
-app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
-app.include_router(imports.router, prefix="/api/v1/imports", tags=["Imports"])
-app.include_router(exports.router, prefix="/api/v1/exports", tags=["Exports"])
-app.include_router(scripting.router, prefix="/api/v1/scripts", tags=["Scripting"])
-app.include_router(trust.router, prefix="/api/v1/trust", tags=["Trust"])
-app.include_router(waterfall.router, prefix="/api/v1/waterfalls", tags=["Waterfalls"])
-app.include_router(costs.router, prefix="/api/v1/costs", tags=["Costs"])
-app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
-app.include_router(automation.router, prefix="/api/v1/automation", tags=["Automation"])
-app.include_router(masking.router, prefix="/api/v1/masking", tags=["Masking"])
-app.include_router(credit_reporting.router, prefix="/api/v1/credit-bureau", tags=["Credit bureau"])
-app.include_router(tags.router, prefix="/api/v1/tags", tags=["Tags"])
-app.include_router(performance.router, prefix="/api/v1/performance", tags=["Performance"])
-app.include_router(edi.router, prefix="/api/v1/edi", tags=["EDI"])
-app.include_router(skip_trace.router, prefix="/api/v1/skip-trace", tags=["Skip trace"])
-app.include_router(demographics.router, prefix="/api/v1/demographics", tags=["Demographics"])
-app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])
-app.include_router(remittance.router, prefix="/api/v1/remittance", tags=["Remittance"])
-app.include_router(flash_messages.router, prefix="/api/v1/flash-messages", tags=["Flash messages"])
-app.include_router(reviews.router, prefix="/api/v1/reviews", tags=["Reviews"])
-app.include_router(courts.router, prefix="/api/v1/courts", tags=["Courts"])
-app.include_router(payment_plans.router, prefix="/api/v1/payment-plans", tags=["Payment plans"])
-app.include_router(batch_letters.router, prefix="/api/v1/batch-letters", tags=["Batch letters"])
-app.include_router(subplans.router, prefix="/api/v1/subplans", tags=["SubPlans"])
-app.include_router(audit_trail.router, prefix="/api/v1/audit-trail", tags=["Audit trail"])
-app.include_router(conditions.router, prefix="/api/v1/conditions", tags=["Conditions"])
-app.include_router(trends.router, prefix="/api/v1/trends", tags=["Trends"])
-app.include_router(safeguards.router, prefix="/api/v1/safeguards", tags=["Safeguards"])
-app.include_router(client_portal.router, prefix="/api/v1/client-portal", tags=["Client portal"])
-app.include_router(doc_drafts.router, prefix="/api/v1/doc-drafts", tags=["Document drafts"])
+app.include_router(master.router, prefix="/api/v1/master", tags=["Master"])
+
+# 2. Operational (master must impersonate to reach these)
+app.include_router(consumers.router, prefix="/api/v1/consumers", tags=["Consumers"], dependencies=OPERATIONAL_GUARD)
+app.include_router(accounts.router, prefix="/api/v1/accounts", tags=["Accounts"], dependencies=OPERATIONAL_GUARD)
+app.include_router(cases.router, prefix="/api/v1/cases", tags=["Cases"], dependencies=OPERATIONAL_GUARD)
+app.include_router(fees.router, prefix="/api/v1/fees", tags=["Fees"], dependencies=OPERATIONAL_GUARD)
+app.include_router(litigation.router, prefix="/api/v1/litigation", tags=["Litigation"], dependencies=OPERATIONAL_GUARD)
+app.include_router(notices.router, prefix="/api/v1/notices", tags=["Notices"], dependencies=OPERATIONAL_GUARD)
+app.include_router(workflow.router, prefix="/api/v1/workflow", tags=["Workflow"], dependencies=OPERATIONAL_GUARD)
+app.include_router(disputes.router, prefix="/api/v1/disputes", tags=["Disputes"], dependencies=OPERATIONAL_GUARD)
+app.include_router(payments.router, prefix="/api/v1/payments", tags=["Payments"], dependencies=OPERATIONAL_GUARD)
+app.include_router(judgments.router, prefix="/api/v1/judgments", tags=["Judgments"], dependencies=OPERATIONAL_GUARD)
+app.include_router(calculations.router, prefix="/api/v1/calculations", tags=["Calculations"], dependencies=OPERATIONAL_GUARD)
+app.include_router(compliance.router, prefix="/api/v1/compliance", tags=["Compliance"], dependencies=OPERATIONAL_GUARD)
+app.include_router(integrations.router, prefix="/api/v1/integrations", tags=["Integrations"], dependencies=OPERATIONAL_GUARD)
+app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"], dependencies=OPERATIONAL_GUARD)
+app.include_router(imports.router, prefix="/api/v1/imports", tags=["Imports"], dependencies=OPERATIONAL_GUARD)
+app.include_router(exports.router, prefix="/api/v1/exports", tags=["Exports"], dependencies=OPERATIONAL_GUARD)
+app.include_router(scripting.router, prefix="/api/v1/scripts", tags=["Scripting"], dependencies=OPERATIONAL_GUARD)
+app.include_router(trust.router, prefix="/api/v1/trust", tags=["Trust"], dependencies=OPERATIONAL_GUARD)
+app.include_router(waterfall.router, prefix="/api/v1/waterfalls", tags=["Waterfalls"], dependencies=OPERATIONAL_GUARD)
+app.include_router(costs.router, prefix="/api/v1/costs", tags=["Costs"], dependencies=OPERATIONAL_GUARD)
+app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"], dependencies=OPERATIONAL_GUARD)
+app.include_router(automation.router, prefix="/api/v1/automation", tags=["Automation"], dependencies=OPERATIONAL_GUARD)
+app.include_router(masking.router, prefix="/api/v1/masking", tags=["Masking"], dependencies=OPERATIONAL_GUARD)
+app.include_router(credit_reporting.router, prefix="/api/v1/credit-bureau", tags=["Credit bureau"], dependencies=OPERATIONAL_GUARD)
+app.include_router(tags.router, prefix="/api/v1/tags", tags=["Tags"], dependencies=OPERATIONAL_GUARD)
+app.include_router(performance.router, prefix="/api/v1/performance", tags=["Performance"], dependencies=OPERATIONAL_GUARD)
+app.include_router(edi.router, prefix="/api/v1/edi", tags=["EDI"], dependencies=OPERATIONAL_GUARD)
+app.include_router(skip_trace.router, prefix="/api/v1/skip-trace", tags=["Skip trace"], dependencies=OPERATIONAL_GUARD)
+app.include_router(demographics.router, prefix="/api/v1/demographics", tags=["Demographics"], dependencies=OPERATIONAL_GUARD)
+app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"], dependencies=OPERATIONAL_GUARD)
+app.include_router(remittance.router, prefix="/api/v1/remittance", tags=["Remittance"], dependencies=OPERATIONAL_GUARD)
+app.include_router(flash_messages.router, prefix="/api/v1/flash-messages", tags=["Flash messages"], dependencies=OPERATIONAL_GUARD)
+app.include_router(reviews.router, prefix="/api/v1/reviews", tags=["Reviews"], dependencies=OPERATIONAL_GUARD)
+app.include_router(courts.router, prefix="/api/v1/courts", tags=["Courts"], dependencies=OPERATIONAL_GUARD)
+app.include_router(payment_plans.router, prefix="/api/v1/payment-plans", tags=["Payment plans"], dependencies=OPERATIONAL_GUARD)
+app.include_router(batch_letters.router, prefix="/api/v1/batch-letters", tags=["Batch letters"], dependencies=OPERATIONAL_GUARD)
+app.include_router(subplans.router, prefix="/api/v1/subplans", tags=["SubPlans"], dependencies=OPERATIONAL_GUARD)
+app.include_router(audit_trail.router, prefix="/api/v1/audit-trail", tags=["Audit trail"], dependencies=OPERATIONAL_GUARD)
+app.include_router(conditions.router, prefix="/api/v1/conditions", tags=["Conditions"], dependencies=OPERATIONAL_GUARD)
+app.include_router(trends.router, prefix="/api/v1/trends", tags=["Trends"], dependencies=OPERATIONAL_GUARD)
+app.include_router(safeguards.router, prefix="/api/v1/safeguards", tags=["Safeguards"], dependencies=OPERATIONAL_GUARD)
+app.include_router(client_portal.router, prefix="/api/v1/client-portal", tags=["Client portal"], dependencies=OPERATIONAL_GUARD)
+app.include_router(doc_drafts.router, prefix="/api/v1/doc-drafts", tags=["Document drafts"], dependencies=OPERATIONAL_GUARD)
 
 
 DCS_SYSTEM_PROMPT = """You are a DCS (Debt Collection System) assistant. You help users create:

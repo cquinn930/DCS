@@ -41,6 +41,20 @@ interface User {
   permissions: string[];
   isOwner: boolean;
   isMaster?: boolean;
+  // Impersonation context (only set when actingAsMaster is true)
+  actingAsMaster?: boolean;
+  actingCanWrite?: boolean;
+  masterUserId?: string;
+  masterTenantId?: string;
+  impersonationId?: string;
+}
+
+interface ImpersonationState {
+  tenantId: string;
+  tenantSlug: string;
+  mode: 'read' | 'write';
+  expiresAt: number; // epoch ms
+  startedAt: number; // epoch ms
 }
 
 interface AuthState {
@@ -51,6 +65,12 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
 
+  // While impersonating, we stash the master's regular tokens here so
+  // `exitImpersonation()` can restore them without re-prompting for login.
+  masterAccessToken: string | null;
+  masterRefreshToken: string | null;
+  impersonation: ImpersonationState | null;
+
   // Actions
   login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
@@ -59,6 +79,27 @@ interface AuthState {
   clearError: () => void;
   hasPermission: (permission: string) => boolean;
   isMasterUser: () => boolean;
+  // Master control plane
+  enterTenant: (slug: string, reason: string, mode: 'read' | 'write') => Promise<boolean>;
+  exitImpersonation: () => Promise<void>;
+}
+
+function decodeUserFromToken(accessToken: string): User {
+  const payload = JSON.parse(atob(accessToken.split('.')[1]));
+  return {
+    id: payload.sub,
+    tenantId: payload.tenant_id,
+    email: payload.email,
+    roles: payload.roles || [],
+    permissions: payload.permissions || [],
+    isOwner: payload.is_owner || false,
+    isMaster: Boolean(payload.is_master),
+    actingAsMaster: Boolean(payload.acting_as_master),
+    actingCanWrite: Boolean(payload.acting_can_write),
+    masterUserId: payload.master_user_id || undefined,
+    masterTenantId: payload.master_tenant_id || undefined,
+    impersonationId: payload.impersonation_id || undefined,
+  };
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -70,6 +111,9 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: false,
       isLoading: false,
       error: null,
+      masterAccessToken: null,
+      masterRefreshToken: null,
+      impersonation: null,
 
       login: async (email: string, password: string) => {
         set({ isLoading: true, error: null });
@@ -82,25 +126,15 @@ export const useAuthStore = create<AuthState>()(
 
           const { access_token, refresh_token } = response.data as { access_token: string; refresh_token: string };
 
-          // Decode JWT to get user info (simple decode, validation happens server-side)
-          const payload = JSON.parse(atob(access_token.split('.')[1]));
-
-          const user: User = {
-            id: payload.sub,
-            tenantId: payload.tenant_id,
-            email: payload.email,
-            roles: payload.roles || [],
-            permissions: payload.permissions || [],
-            isOwner: payload.is_owner || false,
-            isMaster: Boolean(payload.is_master),
-          };
-
           set({
-            user,
+            user: decodeUserFromToken(access_token),
             accessToken: access_token,
             refreshToken: refresh_token,
             isAuthenticated: true,
             isLoading: false,
+            masterAccessToken: null,
+            masterRefreshToken: null,
+            impersonation: null,
           });
 
           return true;
@@ -125,6 +159,9 @@ export const useAuthStore = create<AuthState>()(
           refreshToken: null,
           isAuthenticated: false,
           error: null,
+          masterAccessToken: null,
+          masterRefreshToken: null,
+          impersonation: null,
         });
       },
 
@@ -146,20 +183,8 @@ export const useAuthStore = create<AuthState>()(
       },
 
       setTokens: (accessToken: string, refreshToken: string) => {
-        const payload = JSON.parse(atob(accessToken.split('.')[1]));
-
-        const user: User = {
-          id: payload.sub,
-          tenantId: payload.tenant_id,
-          email: payload.email,
-          roles: payload.roles || [],
-          permissions: payload.permissions || [],
-          isOwner: payload.is_owner || false,
-          isMaster: Boolean(payload.is_master),
-        };
-
         set({
-          user,
+          user: decodeUserFromToken(accessToken),
           accessToken,
           refreshToken,
           isAuthenticated: true,
@@ -179,12 +204,100 @@ export const useAuthStore = create<AuthState>()(
         if (u.isMaster) return true;
         return u.roles.includes('master');
       },
+
+      enterTenant: async (slug: string, reason: string, mode: 'read' | 'write') => {
+        const state = get();
+        if (!state.user?.isMaster || state.user.actingAsMaster) {
+          set({ error: 'Only master users (not already impersonating) can enter a tenant.' });
+          return false;
+        }
+        try {
+          const resp = await apiClient.post(
+            `/api/v1/master/impersonate/${encodeURIComponent(slug)}`,
+            { reason, mode }
+          );
+          const data = resp.data as {
+            access_token: string;
+            expires_in_seconds: number;
+            tenant_id: string;
+            tenant_slug: string;
+            mode: 'read' | 'write';
+          };
+          const now = Date.now();
+          set({
+            // Stash the master tokens so we can restore them on exit.
+            masterAccessToken: state.accessToken,
+            masterRefreshToken: state.refreshToken,
+            // Switch active tokens to the impersonation token.
+            accessToken: data.access_token,
+            // Impersonation tokens cannot be refreshed — clear refresh.
+            refreshToken: null,
+            user: decodeUserFromToken(data.access_token),
+            isAuthenticated: true,
+            impersonation: {
+              tenantId: data.tenant_id,
+              tenantSlug: data.tenant_slug,
+              mode: data.mode,
+              startedAt: now,
+              expiresAt: now + data.expires_in_seconds * 1000,
+            },
+            error: null,
+          });
+          return true;
+        } catch (err: unknown) {
+          let detail: unknown;
+          if (err && typeof err === 'object' && 'response' in err) {
+            detail = (err as { response?: { data?: { detail?: unknown } } })
+              .response?.data?.detail;
+          }
+          set({
+            error:
+              detail != null
+                ? detailToErrorString(detail)
+                : 'Failed to enter tenant. Check the slug and try again.',
+          });
+          return false;
+        }
+      },
+
+      exitImpersonation: async () => {
+        const state = get();
+        if (!state.impersonation) {
+          return;
+        }
+
+        // Best-effort audit ping; never block the UX on it.
+        try {
+          await apiClient.post('/api/v1/master/exit-impersonation');
+        } catch {
+          // Token may already be expired — that's fine, we're leaving anyway.
+        }
+
+        if (state.masterAccessToken) {
+          // Restore master tokens.
+          set({
+            accessToken: state.masterAccessToken,
+            refreshToken: state.masterRefreshToken,
+            user: decodeUserFromToken(state.masterAccessToken),
+            masterAccessToken: null,
+            masterRefreshToken: null,
+            impersonation: null,
+            isAuthenticated: true,
+          });
+        } else {
+          // No stashed master token (shouldn't happen) — force re-login.
+          get().logout();
+        }
+      },
     }),
     {
       name: 'dcs-auth',
       partialize: (state) => ({
         accessToken: state.accessToken,
         refreshToken: state.refreshToken,
+        masterAccessToken: state.masterAccessToken,
+        masterRefreshToken: state.masterRefreshToken,
+        impersonation: state.impersonation,
       }),
     }
   )

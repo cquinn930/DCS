@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
+import { ImpersonationBanner } from '@/components/master/impersonation-banner';
 
 export default function DashboardLayout({
   children,
@@ -17,8 +18,20 @@ export default function DashboardLayout({
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
       router.replace('/login');
+      return;
     }
-  }, [isAuthenticated, isLoading, router]);
+    // Master users land in the master control plane by default. They
+    // only enter the operational app via an impersonation token, which
+    // sets actingAsMaster=true.
+    if (
+      !isLoading &&
+      isAuthenticated &&
+      user?.isMaster &&
+      !user?.actingAsMaster
+    ) {
+      router.replace('/master');
+    }
+  }, [isAuthenticated, isLoading, user, router]);
 
   if (isLoading) {
     return (
@@ -32,11 +45,17 @@ export default function DashboardLayout({
     return null;
   }
 
+  // Don't flash the operational shell while we redirect masters away.
+  if (user?.isMaster && !user?.actingAsMaster) {
+    return null;
+  }
+
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900">
       <Sidebar />
       <div className="lg:pl-64">
         <Header />
+        <ImpersonationBanner />
         <main className="py-6 px-4 sm:px-6 lg:px-8">{children}</main>
       </div>
     </div>
