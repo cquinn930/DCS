@@ -216,8 +216,12 @@ async def get_tenant_sso_config(
         client_id=oidc.get("client_id") or "",
         redirect_uri=oidc.get("redirect_uri") or "",
         allowed_domains=list(oidc.get("allowed_domains") or []),
-        scopes=list(oidc.get("scopes") or ["openid", "email", "profile"]),
+        scopes=list(oidc.get("scopes") or ["openid", "email", "profile", "groups"]),
         enabled=enabled,
+        group_claim=str(oidc.get("group_claim") or "groups"),
+        group_role_map=dict(oidc.get("group_role_map") or {}),
+        owner_groups=list(oidc.get("owner_groups") or []),
+        sync_groups_on_login=bool(oidc.get("sync_groups_on_login", True)),
     )
 
 
@@ -297,4 +301,8 @@ async def update_tenant_sso_config(
         allowed_domains=list(cfg.allowed_domains),
         scopes=list(cfg.scopes),
         enabled=enabled,
+        group_claim=cfg.group_claim,
+        group_role_map=dict(cfg.group_role_map),
+        owner_groups=list(cfg.owner_groups),
+        sync_groups_on_login=cfg.sync_groups_on_login,
     )

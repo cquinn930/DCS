@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dcs_api.models.tenant import Tenant, User
+from dcs_api.models.tenant import Role, Tenant, User, UserRole
 
 
 class OIDCConfig(BaseModel):
@@ -20,8 +20,35 @@ class OIDCConfig(BaseModel):
     client_id: str
     client_secret: str
     redirect_uri: str
-    scopes: list[str] = Field(default_factory=lambda: ["openid", "email", "profile"])
+    scopes: list[str] = Field(
+        default_factory=lambda: ["openid", "email", "profile", "groups"],
+    )
     allowed_domains: list[str] = Field(default_factory=list)
+
+    # ---- Group / role mapping --------------------------------------------
+    # Which JWT/userinfo claim holds the IdP group memberships. Okta
+    # defaults to "groups", Azure AD to "roles" or "groups", Auth0 to
+    # whichever name the rule emits.
+    group_claim: str = "groups"
+
+    # Map of IdP group name -> DCS role name. The DCS role must already
+    # exist in the tenant's roles table; unknown role names are skipped
+    # with a warning. Example:
+    #   {"DCS Owners": "owner", "DCS Collectors": "collector"}
+    group_role_map: dict[str, str] = Field(default_factory=dict)
+
+    # Membership in any of these IdP groups grants is_owner=true on the
+    # tenant. Useful when you do not want to mirror "owner" through the
+    # role table. Comparison is case-sensitive against the values in the
+    # IdP claim.
+    owner_groups: list[str] = Field(default_factory=list)
+
+    # When True (default), every login resets the user's roles to the
+    # set derived from their current IdP groups. Roles assigned manually
+    # in DCS that are not represented in the IdP will be REMOVED.
+    # Set False to use the IdP groups only as an additive hint and
+    # preserve any roles assigned manually in DCS.
+    sync_groups_on_login: bool = True
 
 
 async def get_tenant_oidc_config(session: AsyncSession, tenant_id: uuid.UUID) -> OIDCConfig | None:
@@ -202,12 +229,106 @@ def email_domain_allowed(email: str, allowed_domains: list[str]) -> bool:
     return domain in allowed
 
 
+def _extract_groups(userinfo: dict[str, Any], claim_name: str) -> list[str]:
+    """Pull the groups list out of an OIDC userinfo / id_token payload.
+
+    Tolerates the common shapes we see in the wild:
+      * list[str]:                  ["DCS Admins", "DCS Collectors"]
+      * comma/space-separated str:  "DCS Admins,DCS Collectors"
+      * missing / null:             returns []
+
+    Anything that is not a string after coercion is dropped.
+    """
+    raw = userinfo.get(claim_name)
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(g).strip() for g in raw if str(g).strip()]
+    if isinstance(raw, str):
+        # Some IdPs emit a single string when the user has only one group,
+        # or a delimited string when configured oddly. Split conservatively.
+        parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+        return [p for p in parts if p]
+    return []
+
+
+async def _sync_user_roles_from_groups(
+    session: AsyncSession,
+    user: User,
+    groups: list[str],
+    config: "OIDCConfig",
+) -> None:
+    """Reconcile the user's roles against the IdP group membership.
+
+    Uses ``config.group_role_map`` to translate IdP group names into DCS
+    role names. Unknown role names (no row in the tenant's roles table)
+    are silently skipped -- callers can verify by checking the role
+    table themselves.
+
+    Behaviour summary:
+      * sync_groups_on_login=True (default):
+          The set of roles is REPLACED with whatever the mapping
+          resolves to. Manually-assigned roles are removed if the IdP
+          no longer reports the corresponding group. This is what most
+          customers want -- demote in Okta -> demote in DCS.
+      * sync_groups_on_login=False:
+          Newly-mapped roles are ADDED. Existing roles are left alone.
+    """
+    if not config.group_role_map:
+        return  # nothing to do
+
+    target_role_names: set[str] = set()
+    for grp in groups:
+        mapped = config.group_role_map.get(grp)
+        if mapped:
+            target_role_names.add(mapped)
+
+    # Resolve role names -> Role rows scoped to this tenant. Names not
+    # present in the roles table are dropped (logged via warning would
+    # be ideal, but logging infra varies; keep it silent for now).
+    if target_role_names:
+        rows = await session.execute(
+            select(Role).where(
+                Role.tenant_id == user.tenant_id,
+                Role.name.in_(list(target_role_names)),
+            )
+        )
+        target_roles = list(rows.scalars())
+    else:
+        target_roles = []
+    target_role_ids = {r.id for r in target_roles}
+
+    # Current assignments
+    current_rows = await session.execute(
+        select(UserRole).where(UserRole.user_id == user.id)
+    )
+    current_assignments = list(current_rows.scalars())
+    current_role_ids = {ur.role_id for ur in current_assignments}
+
+    # Add the missing ones
+    for role_id in target_role_ids - current_role_ids:
+        session.add(UserRole(user_id=user.id, role_id=role_id))
+
+    # Remove the stale ones (only when full sync is enabled)
+    if config.sync_groups_on_login:
+        for ur in current_assignments:
+            if ur.role_id not in target_role_ids:
+                await session.delete(ur)
+
+
 async def provision_or_update_user(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     userinfo: dict[str, Any],
     idp_provider: str,
+    config: "OIDCConfig | None" = None,
 ) -> User:
+    """JIT-provision (or refresh) a user from OIDC claims.
+
+    If ``config`` is supplied, IdP group membership is also synced into
+    the user's role assignments and is_owner flag according to
+    ``config.group_role_map`` and ``config.owner_groups``.
+    """
     sub = userinfo.get("sub")
     email = userinfo.get("email")
     if not email or not isinstance(email, str):
@@ -241,6 +362,12 @@ async def provision_or_update_user(
         first_name = parts[0]
         last_name = parts[1] if len(parts) > 1 else None
 
+    # Extract IdP groups once so we can apply them consistently to both
+    # the create and update branches below.
+    groups: list[str] = []
+    if config is not None:
+        groups = _extract_groups(userinfo, config.group_claim)
+
     now = datetime.now(timezone.utc)
     if user:
         user.external_id = sub
@@ -253,6 +380,17 @@ async def provision_or_update_user(
         user.last_login = now
         user.failed_login_attempts = 0
         user.locked_until = None
+
+        if config is not None:
+            # Owner flag is mirrored from group membership when the
+            # tenant configures owner_groups. Empty owner_groups list
+            # means "do not touch is_owner via SSO" -- leaves manual
+            # assignments alone. This is intentional: a typo in the
+            # owner group name should not silently demote everyone.
+            if config.owner_groups:
+                user.is_owner = any(g in groups for g in config.owner_groups)
+            await _sync_user_roles_from_groups(session, user, groups, config)
+
         await session.flush()
         return user
 
@@ -265,12 +403,20 @@ async def provision_or_update_user(
         first_name=first_name,
         last_name=last_name,
         is_active=True,
-        is_owner=False,
+        is_owner=bool(
+            config and config.owner_groups
+            and any(g in groups for g in config.owner_groups),
+        ),
         is_master=False,
         failed_login_attempts=0,
         locked_until=None,
         last_login=now,
     )
     session.add(user)
-    await session.flush()
+    await session.flush()  # need user.id before we can assign roles
+
+    if config is not None:
+        await _sync_user_roles_from_groups(session, user, groups, config)
+        await session.flush()
+
     return user

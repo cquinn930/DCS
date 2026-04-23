@@ -243,7 +243,9 @@ async def sso_callback(
     issuer = urlparse(str(config.issuer))
     idp_provider = issuer.netloc or "oidc"
 
-    user = await provision_or_update_user(session, tenant_id, userinfo, idp_provider)
+    user = await provision_or_update_user(
+        session, tenant_id, userinfo, idp_provider, config=config,
+    )
 
     if not user.is_active:
         raise HTTPException(
