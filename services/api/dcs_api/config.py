@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
+    # Public base URL of *this* API as it appears to the outside world
+    # (i.e. how Okta / Azure AD reach the /sso/callback endpoint). Used
+    # to auto-fill redirect_uri when a tenant saves OIDC config without
+    # one. Override in .env on the deploy host, e.g.
+    #   API_PUBLIC_URL=https://falreports.example.com
+    api_public_url: str = "http://localhost:8000"
 
     # Security
     cors_origins: list[str] = ["http://localhost:3000"]

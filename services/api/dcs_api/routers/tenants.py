@@ -172,6 +172,55 @@ async def update_tenant(
     return TenantResponse.model_validate(tenant)
 
 
+@router.get("/{tenant_id}/sso-config", response_model=OIDCConfigResponse)
+async def get_tenant_sso_config(
+    tenant_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> OIDCConfigResponse:
+    """Read the OIDC config for a tenant.
+
+    Returns a response with empty strings and enabled=false if SSO has
+    never been configured (so the settings UI can render an empty form
+    instead of error-handling a 404).
+
+    `client_secret` is intentionally NOT returned — it's write-only.
+    """
+    if tenant_id != user.tenant_id and not user.is_master:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied",
+        )
+
+    tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tenant not found",
+        )
+
+    oidc = (tenant.settings or {}).get("oidc") or {}
+    enabled = bool(
+        oidc.get("issuer")
+        and oidc.get("client_id")
+        and oidc.get("client_secret")
+        and oidc.get("redirect_uri"),
+    )
+    # Build a permissive response that won't 500 on partially-configured
+    # tenants. We populate URL-typed fields with safe placeholders if
+    # missing, since OIDCConfigResponse expects HttpUrl on `issuer`.
+    return OIDCConfigResponse(
+        issuer=oidc.get("issuer") or "https://example.invalid/",
+        client_id=oidc.get("client_id") or "",
+        redirect_uri=oidc.get("redirect_uri") or "",
+        allowed_domains=list(oidc.get("allowed_domains") or []),
+        scopes=list(oidc.get("scopes") or ["openid", "email", "profile"]),
+        enabled=enabled,
+    )
+
+
 @router.patch("/{tenant_id}/sso-config", response_model=OIDCConfigResponse)
 async def update_tenant_sso_config(
     tenant_id: uuid.UUID,
@@ -207,7 +256,19 @@ async def update_tenant_sso_config(
         oidc[key] = value
 
     if not oidc.get("redirect_uri"):
-        oidc["redirect_uri"] = f"{settings.api_public_url.rstrip('/')}/api/v1/auth/sso/callback"
+        # Fall back to the API's public base URL. Use getattr so a missing
+        # api_public_url setting yields a clean 400, not a 500.
+        api_base = getattr(settings, "api_public_url", "") or ""
+        if not api_base:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "redirect_uri is required: server has no API_PUBLIC_URL "
+                    "configured to derive a default. Either set API_PUBLIC_URL "
+                    "in the API .env or supply redirect_uri in the request body."
+                ),
+            )
+        oidc["redirect_uri"] = f"{api_base.rstrip('/')}/api/v1/auth/sso/callback"
 
     merged = dict(oidc)
     try:
