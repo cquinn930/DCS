@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dcs_api.auth.jwt import create_access_token, create_refresh_token, decode_token
@@ -193,39 +193,10 @@ def _validate_post_login_url(url: str | None, allowed_bases: list[str]) -> str |
     )
 
 
-@router.get("/sso/{tenant_slug}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-async def sso_start(
-    tenant_slug: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    next: str | None = Query(None, alias="next"),
-) -> RedirectResponse:
-    result = await session.execute(select(Tenant).where(Tenant.slug == tenant_slug))
-    tenant = result.scalar_one_or_none()
-    if not tenant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-
-    config = await get_tenant_oidc_config(session, tenant.id)
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="SSO is not configured for this tenant",
-        )
-
-    next_ok = _validate_post_login_url(next, settings.cors_origins)
-    payload: dict = {
-        "tenant_id": str(tenant.id),
-        "nonce": secrets.token_hex(16),
-    }
-    if next_ok:
-        payload["next"] = next_ok
-    state = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
-    state = state.rstrip("=")
-
-    discovery = await discover_oidc(config.issuer)
-    location = build_authorization_url(config, discovery, state)
-    return RedirectResponse(url=location, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-
-
+# IMPORTANT: /sso/callback MUST be declared before /sso/{tenant_slug}.
+# FastAPI matches routes in declaration order; the parameterized route
+# would otherwise greedily capture "callback" as a slug, send it to
+# the tenant lookup, and 404 the entire OIDC return trip.
 @router.get("/sso/callback", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 async def sso_callback(
     request: Request,
@@ -321,6 +292,59 @@ async def sso_callback(
         f"&refresh_token={quote(refresh_token)}&expires_in={expires_in}"
     )
     return RedirectResponse(url=target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+# Declared AFTER /sso/callback so FastAPI's router matches the literal
+# path first and only falls through to this catch-all for real slugs.
+@router.get("/sso/{tenant_slug}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+async def sso_start(
+    tenant_slug: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    next: str | None = Query(None, alias="next"),
+) -> RedirectResponse:
+    # Defensive guard: if a misconfigured proxy/route order ever lets
+    # "callback" (or any other reserved word) reach this handler as a
+    # slug, fail loudly with a meaningful message instead of "Tenant
+    # not found", which has historically masked routing bugs.
+    if tenant_slug.lower() in {"callback"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"'{tenant_slug}' is a reserved path segment, not a tenant slug. "
+                "This usually indicates a route-ordering bug or a stale rewrite."
+            ),
+        )
+
+    # Slugs in the DB are lowercase by convention; tolerate any casing
+    # in the URL so an Initiate Login URI with mixed case still works.
+    normalized = tenant_slug.strip().lower()
+    result = await session.execute(
+        select(Tenant).where(func.lower(Tenant.slug) == normalized)
+    )
+    tenant = result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    config = await get_tenant_oidc_config(session, tenant.id)
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="SSO is not configured for this tenant",
+        )
+
+    next_ok = _validate_post_login_url(next, settings.cors_origins)
+    payload: dict = {
+        "tenant_id": str(tenant.id),
+        "nonce": secrets.token_hex(16),
+    }
+    if next_ok:
+        payload["next"] = next_ok
+    state = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    state = state.rstrip("=")
+
+    discovery = await discover_oidc(config.issuer)
+    location = build_authorization_url(config, discovery, state)
+    return RedirectResponse(url=location, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 async def _log_failed_login(
