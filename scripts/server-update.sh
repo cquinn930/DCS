@@ -357,19 +357,32 @@ log "Restarting services"
 run "systemctl restart dcs-api"
 run "systemctl restart dcs-ui"
 
-if [[ $DRY_RUN -eq 0 ]]; then
-    sleep 3
-fi
+# Wait up to ~30s for each service to come up. Uvicorn with 4 workers
+# typically needs 5-8s to finish startup; Next.js standalone is faster
+# but we keep the same budget for symmetry.
+wait_for_url() {
+    local url="$1"
+    local label="$2"
+    local tries=15  # 15 * 2s = 30s
+    if [[ $DRY_RUN -ne 0 ]]; then
+        return 0
+    fi
+    for ((i=1; i<=tries; i++)); do
+        if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
 
 api_ok=0
 ui_ok=0
-if [[ $DRY_RUN -eq 0 ]]; then
-    if curl -fsS --max-time 5 http://127.0.0.1:8000/health >/dev/null 2>&1; then
-        api_ok=1
-    fi
-    if curl -fsS --max-time 5 http://127.0.0.1:3000 >/dev/null 2>&1; then
-        ui_ok=1
-    fi
+if wait_for_url "http://127.0.0.1:8000/health" "dcs-api"; then
+    api_ok=1
+fi
+if wait_for_url "http://127.0.0.1:3000"        "dcs-ui"; then
+    ui_ok=1
 fi
 
 echo
