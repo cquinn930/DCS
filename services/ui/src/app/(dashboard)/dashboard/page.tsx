@@ -80,15 +80,18 @@ export default function DashboardPage() {
           }
         }
 
-        // Fetch status breakdown via separate account queries
-        const statuses = ['ACTIVE', 'HOLD', 'CLOSED', 'PAID_IN_FULL', 'SETTLED', 'LEGAL_HOLD'];
+        // Fetch status breakdown via separate account queries.
+        // The AccountStatus enum on the API stores LOWERCASE values
+        // (active, hold, closed, ...). Sending uppercase here trips
+        // FastAPI's enum-by-value parser and produces a 422 per status.
+        const statuses = ['active', 'hold', 'closed', 'paid_in_full', 'settled', 'legal_hold'] as const;
         const breakdowns: StatusBreakdown[] = [];
         for (const s of statuses) {
           try {
             const res = await apiClient.get<any>(`/api/v1/accounts?status_filter=${s}&page=1&page_size=1`);
             const d = res.data as any;
             if (d && d.total > 0) {
-              breakdowns.push({ status: s, count: d.total, balance: 0 });
+              breakdowns.push({ status: s.toUpperCase(), count: d.total, balance: 0 });
             }
           } catch { /* skip */ }
         }
