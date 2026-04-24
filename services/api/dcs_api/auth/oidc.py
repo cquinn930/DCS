@@ -309,7 +309,10 @@ async def _sync_user_roles_from_groups(
             user.tenant_id,
             sorted(missing_names),
         )
-    logger.info(
+    # WARNING-level so uvicorn's default config does not swallow it.
+    # Diagnostic value > log noise here; revisit once a global logging
+    # config is added.
+    logger.warning(
         "OIDC role sync for user=%s groups=%s -> mapped=%s -> resolved=%s "
         "(sync_groups_on_login=%s)",
         user.id,

@@ -236,7 +236,10 @@ async def sso_callback(
     # specifically, what the configured group_claim returned. We log only
     # the keys + the groups list, never the raw token, to avoid leaking
     # PII or anything sensitive into journalctl.
-    logger.info(
+    # WARNING-level so it appears under uvicorn's default config (which
+    # silences INFO from non-uvicorn loggers). Demote to INFO once a
+    # global logging config is added.
+    logger.warning(
         "SSO callback claims for tenant=%s claim_keys=%s %s=%r",
         tenant_id,
         sorted(userinfo.keys()),
