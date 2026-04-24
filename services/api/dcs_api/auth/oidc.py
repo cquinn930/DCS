@@ -209,6 +209,13 @@ async def resolve_oidc_user_claims(
         except HTTPException:
             userinfo_claims = {}
 
+    # TEMPORARY raw-claim diagnostics. Dump the full id_token payload
+    # and full userinfo response before any merging so we can see
+    # exactly what the IdP returned. Remove these two lines once SSO
+    # group claims are confirmed working.
+    logger.warning("RAW id_token claims: %r", id_token_claims)
+    logger.warning("RAW userinfo claims: %r", userinfo_claims)
+
     if not id_token_claims and not userinfo_claims:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
