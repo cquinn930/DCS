@@ -71,9 +71,16 @@ async def get_tenant_oidc_config(session: AsyncSession, tenant_id: uuid.UUID) ->
 async def discover_oidc(issuer: str) -> dict[str, Any]:
     base = issuer.rstrip("/")
     url = f"{base}/.well-known/openid-configuration"
+    logger.warning("OIDC RAW discovery request: GET %s", url)
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(url, timeout=30.0)
+            logger.warning(
+                "OIDC RAW discovery response: status=%s headers=%r body=%s",
+                response.status_code,
+                dict(response.headers),
+                response.text,
+            )
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as e:
@@ -108,6 +115,10 @@ async def exchange_code(config: OIDCConfig, code: str, discovery: dict[str, Any]
         "client_id": config.client_id,
         "client_secret": config.client_secret,
     }
+    logged_form = {**form, "client_secret": "<redacted>"}
+    logger.warning(
+        "OIDC RAW token request: POST %s form=%r", token_endpoint, logged_form
+    )
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.post(
@@ -115,6 +126,12 @@ async def exchange_code(config: OIDCConfig, code: str, discovery: dict[str, Any]
                 data=form,
                 headers={"Accept": "application/json"},
                 timeout=30.0,
+            )
+            logger.warning(
+                "OIDC RAW token response: status=%s headers=%r body=%s",
+                response.status_code,
+                dict(response.headers),
+                response.text,
             )
             response.raise_for_status()
             body = response.json()
@@ -152,12 +169,22 @@ async def get_userinfo(access_token: str, discovery: dict[str, Any]) -> dict[str
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="OIDC discovery missing userinfo_endpoint",
         )
+    logger.warning(
+        "OIDC RAW userinfo request: GET %s (bearer access_token redacted)",
+        endpoint,
+    )
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(
                 endpoint,
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=30.0,
+            )
+            logger.warning(
+                "OIDC RAW userinfo response: status=%s headers=%r body=%s",
+                response.status_code,
+                dict(response.headers),
+                response.text,
             )
             response.raise_for_status()
             data = response.json()
@@ -193,28 +220,44 @@ async def resolve_oidc_user_claims(
     while ID-token-only claims (groups, custom app claims) still flow
     through.
     """
+    # Dump the entire token_response (already logged in exchange_code,
+    # but log here too with keys + decoded id_token side by side so
+    # the picture is complete in one place).
+    logger.warning(
+        "OIDC RAW token_response keys=%r token_response=%r",
+        sorted(token_response.keys()),
+        token_response,
+    )
+
     id_token_claims: dict[str, Any] = {}
     id_token = token_response.get("id_token")
     if isinstance(id_token, str) and id_token:
+        logger.warning("OIDC RAW id_token JWT: %s", id_token)
         try:
             id_token_claims = jose_jwt.get_unverified_claims(id_token) or {}
-        except Exception:
+        except Exception as exc:
+            logger.warning("OIDC RAW id_token decode failed: %r", exc)
             id_token_claims = {}
+    else:
+        logger.warning("OIDC RAW id_token absent from token_response")
 
     userinfo_claims: dict[str, Any] = {}
     access = token_response.get("access_token")
     if isinstance(access, str) and discovery.get("userinfo_endpoint"):
         try:
             userinfo_claims = await get_userinfo(access, discovery) or {}
-        except HTTPException:
+        except HTTPException as exc:
+            logger.warning("OIDC RAW userinfo fetch failed: %r", exc)
             userinfo_claims = {}
+    else:
+        logger.warning(
+            "OIDC RAW userinfo skipped: access_token=%s userinfo_endpoint=%s",
+            type(access).__name__,
+            discovery.get("userinfo_endpoint"),
+        )
 
-    # TEMPORARY raw-claim diagnostics. Dump the full id_token payload
-    # and full userinfo response before any merging so we can see
-    # exactly what the IdP returned. Remove these two lines once SSO
-    # group claims are confirmed working.
-    logger.warning("RAW id_token claims: %r", id_token_claims)
-    logger.warning("RAW userinfo claims: %r", userinfo_claims)
+    logger.warning("OIDC RAW id_token decoded claims: %r", id_token_claims)
+    logger.warning("OIDC RAW userinfo decoded claims: %r", userinfo_claims)
 
     if not id_token_claims and not userinfo_claims:
         raise HTTPException(
@@ -223,6 +266,11 @@ async def resolve_oidc_user_claims(
         )
 
     merged: dict[str, Any] = {**id_token_claims, **userinfo_claims}
+    logger.warning(
+        "OIDC RAW merged claims keys=%r merged=%r",
+        sorted(merged.keys()),
+        merged,
+    )
     if not merged.get("sub"):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
