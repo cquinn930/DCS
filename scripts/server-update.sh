@@ -270,6 +270,29 @@ fi
 API_DIR="$INSTALL_DIR/services/api"
 
 if [[ -d "$API_DIR" ]]; then
+    # python3-saml has a build-time dependency on libxmlsec1 / libxml2
+    # / pkg-config. Install the apt packages once so `pip install
+    # python3-saml` doesn't blow up with cryptic "missing xmlsec1.h"
+    # errors. Idempotent: apt is a no-op when everything is current.
+    log "Ensuring SAML build-time system packages are present"
+    if command -v apt-get >/dev/null 2>&1; then
+        SAML_APT_PKGS=(libxmlsec1-dev libxml2-dev pkg-config)
+        missing=()
+        for pkg in "${SAML_APT_PKGS[@]}"; do
+            if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+                missing+=("$pkg")
+            fi
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            run "apt-get update -qq"
+            run "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${missing[*]}"
+        else
+            echo "  apt packages already installed: ${SAML_APT_PKGS[*]}"
+        fi
+    else
+        warn "apt-get not found; if python3-saml install fails, install libxmlsec1-dev libxml2-dev pkg-config manually"
+    fi
+
     log "Refreshing Python dependencies"
     as_owner "
         cd '$API_DIR'

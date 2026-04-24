@@ -11,7 +11,7 @@ from urllib.parse import quote, urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +27,24 @@ from dcs_api.auth.oidc import (
 )
 from dcs_api.auth.password import verify_password
 from dcs_api.auth.rbac import get_user_permissions, get_user_roles
+from dcs_api.auth.saml import (
+    build_login_redirect as build_saml_login_redirect,
+)
+from dcs_api.auth.saml import (
+    build_sp_metadata as build_saml_sp_metadata,
+)
+from dcs_api.auth.saml import (
+    email_domain_allowed as saml_email_domain_allowed,
+)
+from dcs_api.auth.saml import (
+    get_tenant_saml_config,
+    process_acs as process_saml_acs,
+)
 from dcs_api.config import get_settings
 from dcs_api.database import get_session
 from dcs_api.models.tenant import AuditAction, AuditLog, Tenant, User
 from dcs_api.schemas.auth import LoginRequest, LoginResponse, RefreshRequest, TokenResponse
+from dcs_api.schemas.sso import infer_protocol
 
 router = APIRouter()
 settings = get_settings()
@@ -263,32 +277,7 @@ async def sso_callback(
     user = await provision_or_update_user(
         session, tenant_id, userinfo, idp_provider, config=config,
     )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is inactive",
-        )
-    if user.locked_until and user.locked_until > datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail="Account is temporarily locked",
-        )
-
-    roles = await get_user_roles(session, user.id)
-    permissions = await get_user_permissions(session, user.id)
-
-    access_token = create_access_token(
-        user_id=user.id,
-        tenant_id=user.tenant_id,
-        email=user.email,
-        roles=roles,
-        permissions=list(permissions),
-        is_owner=user.is_owner,
-        is_master=user.is_master,
-    )
-    refresh_token = create_refresh_token(user.id, user.tenant_id)
-    expires_in = settings.jwt_access_token_expire_minutes * 60
+    access_token, refresh_token, expires_in = await _mint_tokens_for_user(session, user)
 
     audit = AuditLog(
         tenant_id=user.tenant_id,
@@ -304,6 +293,40 @@ async def sso_callback(
 
     next_raw = decoded.get("next")
     next_url = _validate_post_login_url(next_raw, settings.cors_origins) if next_raw else None
+    return _post_login_redirect(user, access_token, refresh_token, expires_in, next_url)
+
+
+async def _resolve_tenant_by_slug(session: AsyncSession, tenant_slug: str) -> Tenant:
+    """Look up a tenant from a (possibly mixed-case) slug.
+
+    The defensive "callback" guard is OIDC-specific; the new SAML
+    routes live under ``/sso/saml/...`` and never collide.
+    """
+    if tenant_slug.lower() in {"callback", "saml"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"'{tenant_slug}' is a reserved path segment, not a tenant slug. "
+                "This usually indicates a route-ordering bug or a stale rewrite."
+            ),
+        )
+    normalized = tenant_slug.strip().lower()
+    result = await session.execute(
+        select(Tenant).where(func.lower(Tenant.slug) == normalized)
+    )
+    tenant = result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    return tenant
+
+
+def _post_login_redirect(
+    user: User,
+    access_token: str,
+    refresh_token: str,
+    expires_in: int,
+    next_url: str | None,
+) -> RedirectResponse:
     base = next_url or (settings.cors_origins[0] if settings.cors_origins else "http://localhost:3000")
     sep = "&" if "?" in base else "?"
     target = (
@@ -313,37 +336,157 @@ async def sso_callback(
     return RedirectResponse(url=target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
+async def _mint_tokens_for_user(
+    session: AsyncSession, user: User
+) -> tuple[str, str, int]:
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is inactive",
+        )
+    if user.locked_until and user.locked_until > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="Account is temporarily locked",
+        )
+    roles = await get_user_roles(session, user.id)
+    permissions = await get_user_permissions(session, user.id)
+    access_token = create_access_token(
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        email=user.email,
+        roles=roles,
+        permissions=list(permissions),
+        is_owner=user.is_owner,
+        is_master=user.is_master,
+    )
+    refresh = create_refresh_token(user.id, user.tenant_id)
+    return access_token, refresh, settings.jwt_access_token_expire_minutes * 60
+
+
 # Declared AFTER /sso/callback so FastAPI's router matches the literal
 # path first and only falls through to this catch-all for real slugs.
+@router.get("/sso/saml/{tenant_slug}/metadata")
+async def sso_saml_metadata(
+    tenant_slug: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Return the SP metadata XML for a SAML-enabled tenant.
+
+    Public on purpose — the IdP admin needs to fetch this without
+    credentials when configuring the trust. We include the realm
+    discriminator (``tenant_slug``) in the URL so a single deployment
+    can serve metadata for many tenants.
+    """
+    tenant = await _resolve_tenant_by_slug(session, tenant_slug)
+    config = await get_tenant_saml_config(session, tenant.id)
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="SAML is not configured for this tenant",
+        )
+    xml = build_saml_sp_metadata(config)
+    return Response(content=xml, media_type="application/samlmetadata+xml")
+
+
+@router.post("/sso/saml/{tenant_slug}/acs", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+async def sso_saml_acs(
+    request: Request,
+    tenant_slug: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RedirectResponse:
+    """Assertion Consumer Service for SAML-enabled tenants.
+
+    The IdP POSTs the SAMLResponse here (HTTP-POST binding). We
+    validate it, JIT-provision the user, mint our own tokens, and 307
+    them back to the UI with the same query-string contract that OIDC
+    uses, so the frontend handler doesn't need a SAML branch.
+    """
+    tenant = await _resolve_tenant_by_slug(session, tenant_slug)
+    config = await get_tenant_saml_config(session, tenant.id)
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="SAML is not configured for this tenant",
+        )
+
+    claims, relay_state = await process_saml_acs(config, request)
+
+    logger.warning(
+        "SAML ACS claims for tenant=%s claim_keys=%s %s=%r",
+        tenant.id,
+        sorted(claims.keys()),
+        config.group_claim,
+        claims.get(config.group_claim),
+    )
+
+    email = claims.get("email")
+    if isinstance(email, str) and not saml_email_domain_allowed(
+        email.strip().lower(),
+        config.allowed_domains,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email domain is not allowed for this organization",
+        )
+
+    idp_provider = urlparse(config.idp_sso_url).netloc or "saml"
+    user = await provision_or_update_user(
+        session, tenant.id, claims, idp_provider, config=config,
+    )
+    access_token, refresh, expires_in = await _mint_tokens_for_user(session, user)
+
+    audit = AuditLog(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        action=AuditAction.LOGIN,
+        entity_type="user",
+        entity_id=user.id,
+        description=f"User {user.email} logged in via SAML",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    session.add(audit)
+
+    # RelayState carries the post-login redirect, validated against
+    # CORS origins so a malicious IdP can't open-redirect us.
+    next_url = _validate_post_login_url(relay_state, settings.cors_origins)
+    return _post_login_redirect(user, access_token, refresh, expires_in, next_url)
+
+
+# Declared AFTER /sso/callback and /sso/saml/... so FastAPI's router
+# matches the literal paths first and only falls through to this
+# catch-all for real slugs.
 @router.get("/sso/{tenant_slug}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 async def sso_start(
+    request: Request,
     tenant_slug: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     next: str | None = Query(None, alias="next"),
 ) -> RedirectResponse:
-    # Defensive guard: if a misconfigured proxy/route order ever lets
-    # "callback" (or any other reserved word) reach this handler as a
-    # slug, fail loudly with a meaningful message instead of "Tenant
-    # not found", which has historically masked routing bugs.
-    if tenant_slug.lower() in {"callback"}:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"'{tenant_slug}' is a reserved path segment, not a tenant slug. "
-                "This usually indicates a route-ordering bug or a stale rewrite."
-            ),
-        )
+    """Start the SSO dance for a tenant.
 
-    # Slugs in the DB are lowercase by convention; tolerate any casing
-    # in the URL so an Initiate Login URI with mixed case still works.
-    normalized = tenant_slug.strip().lower()
-    result = await session.execute(
-        select(Tenant).where(func.lower(Tenant.slug) == normalized)
-    )
-    tenant = result.scalar_one_or_none()
-    if not tenant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    Dispatches by ``tenant.settings.sso.protocol``. Both protocols
+    accept the same ``?next=`` query for post-login redirect:
+      * OIDC: encoded into the OAuth ``state`` parameter.
+      * SAML: encoded into the SAML ``RelayState`` parameter.
+    """
+    tenant = await _resolve_tenant_by_slug(session, tenant_slug)
+    protocol = infer_protocol(tenant.settings)
 
+    if protocol == "saml":
+        config = await get_tenant_saml_config(session, tenant.id)
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="SAML is not configured for this tenant",
+            )
+        next_ok = _validate_post_login_url(next, settings.cors_origins)
+        location = build_saml_login_redirect(config, request, relay_state=next_ok or "/")
+        return RedirectResponse(url=location, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    # Default and explicit "oidc" both fall through to OIDC for
+    # backwards-compat with tenants that pre-date SAML support.
     config = await get_tenant_oidc_config(session, tenant.id)
     if not config:
         raise HTTPException(

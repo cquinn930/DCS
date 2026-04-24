@@ -51,6 +51,49 @@ type RoleRow = {
   description?: string | null;
 };
 
+type SsoProtocol = 'oidc' | 'saml' | 'none';
+
+type OidcSubResponse = {
+  issuer: string;
+  client_id: string;
+  redirect_uri: string;
+  allowed_domains: string[];
+  scopes: string[];
+  enabled: boolean;
+  group_claim: string;
+  group_role_map: Record<string, string>;
+  owner_groups: string[];
+  sync_groups_on_login: boolean;
+};
+
+type SamlSubResponse = {
+  idp_entity_id: string;
+  idp_sso_url: string;
+  idp_cert_present: boolean;
+  idp_slo_url: string | null;
+  sp_entity_id: string;
+  sp_acs_url: string;
+  sp_metadata_url: string;
+  sign_authn_requests: boolean;
+  sp_cert_present: boolean;
+  sp_key_present: boolean;
+  allowed_domains: string[];
+  group_attribute: string;
+  group_role_map: Record<string, string>;
+  owner_groups: string[];
+  sync_groups_on_login: boolean;
+  first_name_attribute: string;
+  last_name_attribute: string;
+  email_attribute: string;
+  enabled: boolean;
+};
+
+type UnifiedSsoResponse = {
+  protocol: SsoProtocol;
+  oidc: OidcSubResponse;
+  saml: SamlSubResponse;
+};
+
 const tabs = [
   { id: 'general', name: 'General', icon: Database },
   { id: 'users', name: 'Users & Roles', icon: Users },
@@ -80,6 +123,18 @@ export default function SettingsPage() {
     token && activeTab === 'sso' ? ['tenant-current-sso', token] : null,
     async () => {
       const { data } = await apiClient.get<Tenant>('/api/v1/tenants/current');
+      return data;
+    }
+  );
+
+  const { data: unifiedSso, mutate: mutUnifiedSso } = useSWR(
+    token && activeTab === 'sso' && tenantSso?.id
+      ? ['tenant-sso-unified', tenantSso.id, token]
+      : null,
+    async () => {
+      const { data } = await apiClient.get<UnifiedSsoResponse>(
+        `/api/v1/tenants/${tenantSso!.id}/sso-config/unified`
+      );
       return data;
     }
   );
@@ -298,6 +353,120 @@ export default function SettingsPage() {
       `/${user.tenantId}/sso-config`
     );
     await mutTenantSso();
+    await mutUnifiedSso();
+  }
+
+  // ---- SAML state ------------------------------------------------------
+  const [samlForm, setSamlForm] = useState({
+    idp_entity_id: '',
+    idp_sso_url: '',
+    idp_x509_cert: '',
+    idp_slo_url: '',
+    sign_authn_requests: false,
+    sp_x509_cert: '',
+    sp_private_key: '',
+    allowed_domains: '',
+    group_attribute: 'groups',
+    group_role_map: '', // edited as JSON in the textarea
+    owner_groups: '',
+    sync_groups_on_login: true,
+    first_name_attribute: 'firstName',
+    last_name_attribute: 'lastName',
+    email_attribute: 'email',
+  });
+
+  useEffect(() => {
+    if (!unifiedSso?.saml) return;
+    const s = unifiedSso.saml;
+    setSamlForm({
+      idp_entity_id: s.idp_entity_id || '',
+      idp_sso_url: s.idp_sso_url || '',
+      // never echoed back; leave blank so admin can paste a new value
+      idp_x509_cert: '',
+      idp_slo_url: s.idp_slo_url || '',
+      sign_authn_requests: s.sign_authn_requests || false,
+      sp_x509_cert: '',
+      sp_private_key: '',
+      allowed_domains: (s.allowed_domains ?? []).join(', '),
+      group_attribute: s.group_attribute || 'groups',
+      group_role_map: Object.keys(s.group_role_map || {}).length
+        ? JSON.stringify(s.group_role_map, null, 2)
+        : '',
+      owner_groups: (s.owner_groups ?? []).join(', '),
+      sync_groups_on_login: s.sync_groups_on_login ?? true,
+      first_name_attribute: s.first_name_attribute || 'firstName',
+      last_name_attribute: s.last_name_attribute || 'lastName',
+      email_attribute: s.email_attribute || 'email',
+    });
+  }, [unifiedSso]);
+
+  const { trigger: patchSaml, isMutating: savingSaml } = useApiMutation<
+    Record<string, unknown>,
+    unknown
+  >('PATCH', '/api/v1/tenants');
+  const { trigger: putProtocol, isMutating: switchingProtocol } =
+    useApiMutation<{ protocol: SsoProtocol }, unknown>(
+      'PUT',
+      '/api/v1/tenants'
+    );
+
+  async function saveSaml() {
+    if (!user?.tenantId) return;
+    const splitList = (s: string) =>
+      s
+        .split(/[,;\s]+/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+    let groupRoleMap: Record<string, string> | undefined;
+    if (samlForm.group_role_map.trim()) {
+      try {
+        const parsed = JSON.parse(samlForm.group_role_map);
+        if (parsed && typeof parsed === 'object') {
+          groupRoleMap = parsed as Record<string, string>;
+        }
+      } catch {
+        alert('Group → role map is not valid JSON');
+        return;
+      }
+    }
+    const allowed = splitList(samlForm.allowed_domains);
+    const ownerGroups = splitList(samlForm.owner_groups);
+    await patchSaml(
+      {
+        idp_entity_id: samlForm.idp_entity_id || undefined,
+        idp_sso_url: samlForm.idp_sso_url || undefined,
+        // only PATCH the cert when the admin has typed a new one,
+        // otherwise we'd wipe the stored cert with an empty string
+        idp_x509_cert: samlForm.idp_x509_cert || undefined,
+        idp_slo_url: samlForm.idp_slo_url || undefined,
+        sign_authn_requests: samlForm.sign_authn_requests,
+        sp_x509_cert: samlForm.sp_x509_cert || undefined,
+        sp_private_key: samlForm.sp_private_key || undefined,
+        allowed_domains: allowed.length ? allowed : undefined,
+        group_attribute: samlForm.group_attribute || undefined,
+        group_role_map: groupRoleMap,
+        owner_groups: ownerGroups.length ? ownerGroups : undefined,
+        sync_groups_on_login: samlForm.sync_groups_on_login,
+        first_name_attribute: samlForm.first_name_attribute || undefined,
+        last_name_attribute: samlForm.last_name_attribute || undefined,
+        email_attribute: samlForm.email_attribute || undefined,
+      },
+      `/${user.tenantId}/sso-config/saml`
+    );
+    await mutUnifiedSso();
+  }
+
+  async function switchSsoProtocol(target: SsoProtocol) {
+    if (!user?.tenantId) return;
+    await putProtocol({ protocol: target }, `/${user.tenantId}/sso-config/protocol`);
+    await mutUnifiedSso();
+  }
+
+  function copyToClipboard(text: string) {
+    if (!text) return;
+    navigator.clipboard?.writeText(text).catch(() => {
+      // best-effort
+    });
   }
 
   const uPageCount = Math.max(1, Math.ceil((uTotal ?? 0) / uPageSize));
@@ -494,67 +663,23 @@ export default function SettingsPage() {
           )}
 
           {activeTab === 'sso' && (
-            <div className="space-y-4">
-              <h2 className="text-lg font-semibold text-foreground">SSO</h2>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                PATCH /api/v1/tenants/&#123;id&#125;/sso-config (OIDC)
-              </p>
-              <div className="grid max-w-xl gap-4">
-                <FormField label="Issuer (URL)">
-                  <input
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={ssoForm.issuer}
-                    onChange={(e) =>
-                      setSsoForm((f) => ({ ...f, issuer: e.target.value }))
-                    }
-                  />
-                </FormField>
-                <FormField label="Client ID">
-                  <input
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={ssoForm.client_id}
-                    onChange={(e) =>
-                      setSsoForm((f) => ({ ...f, client_id: e.target.value }))
-                    }
-                  />
-                </FormField>
-                <FormField label="Client secret">
-                  <input
-                    type="password"
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={ssoForm.client_secret}
-                    onChange={(e) =>
-                      setSsoForm((f) => ({
-                        ...f,
-                        client_secret: e.target.value,
-                      }))
-                    }
-                    autoComplete="new-password"
-                  />
-                </FormField>
-                <FormField label="Allowed domains (comma-separated)">
-                  <input
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={ssoForm.allowed_domains}
-                    onChange={(e) =>
-                      setSsoForm((f) => ({
-                        ...f,
-                        allowed_domains: e.target.value,
-                      }))
-                    }
-                    placeholder="example.com, app.example.com"
-                  />
-                </FormField>
-                <button
-                  type="button"
-                  disabled={savingSso}
-                  onClick={saveSso}
-                  className="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
-                >
-                  {savingSso ? 'Saving…' : 'Save SSO config'}
-                </button>
-              </div>
-            </div>
+            <SsoTab
+              activeProtocol={unifiedSso?.protocol ?? 'none'}
+              oidcEnabled={unifiedSso?.oidc?.enabled ?? false}
+              samlEnabled={unifiedSso?.saml?.enabled ?? false}
+              samlMeta={unifiedSso?.saml}
+              onSwitch={switchSsoProtocol}
+              switching={switchingProtocol}
+              ssoForm={ssoForm}
+              setSsoForm={setSsoForm}
+              saveOidc={saveSso}
+              savingOidc={savingSso}
+              samlForm={samlForm}
+              setSamlForm={setSamlForm}
+              saveSaml={saveSaml}
+              savingSaml={savingSaml}
+              copyToClipboard={copyToClipboard}
+            />
           )}
 
           {activeTab === 'ai' && (
@@ -659,6 +784,508 @@ export default function SettingsPage() {
           </FormField>
         </div>
       </FormDrawer>
+    </div>
+  );
+}
+
+type SsoTabProps = {
+  activeProtocol: SsoProtocol;
+  oidcEnabled: boolean;
+  samlEnabled: boolean;
+  samlMeta?: SamlSubResponse;
+  onSwitch: (target: SsoProtocol) => Promise<void>;
+  switching: boolean;
+  ssoForm: {
+    issuer: string;
+    client_id: string;
+    client_secret: string;
+    allowed_domains: string;
+  };
+  setSsoForm: React.Dispatch<
+    React.SetStateAction<{
+      issuer: string;
+      client_id: string;
+      client_secret: string;
+      allowed_domains: string;
+    }>
+  >;
+  saveOidc: () => Promise<void>;
+  savingOidc: boolean;
+  samlForm: {
+    idp_entity_id: string;
+    idp_sso_url: string;
+    idp_x509_cert: string;
+    idp_slo_url: string;
+    sign_authn_requests: boolean;
+    sp_x509_cert: string;
+    sp_private_key: string;
+    allowed_domains: string;
+    group_attribute: string;
+    group_role_map: string;
+    owner_groups: string;
+    sync_groups_on_login: boolean;
+    first_name_attribute: string;
+    last_name_attribute: string;
+    email_attribute: string;
+  };
+  setSamlForm: React.Dispatch<React.SetStateAction<SsoTabProps['samlForm']>>;
+  saveSaml: () => Promise<void>;
+  savingSaml: boolean;
+  copyToClipboard: (text: string) => void;
+};
+
+function SsoTab({
+  activeProtocol,
+  oidcEnabled,
+  samlEnabled,
+  samlMeta,
+  onSwitch,
+  switching,
+  ssoForm,
+  setSsoForm,
+  saveOidc,
+  savingOidc,
+  samlForm,
+  setSamlForm,
+  saveSaml,
+  savingSaml,
+  copyToClipboard,
+}: SsoTabProps) {
+  // Local view state — when admin opens a protocol form they may not
+  // have switched the active protocol yet. Default to whichever is
+  // active, fall back to "oidc".
+  const [view, setView] = useState<SsoProtocol>(
+    activeProtocol === 'none' ? 'oidc' : activeProtocol
+  );
+  useEffect(() => {
+    if (activeProtocol !== 'none') setView(activeProtocol);
+  }, [activeProtocol]);
+
+  const inputCls =
+    'w-full rounded-md border border-input bg-background px-3 py-2 text-sm';
+
+  const acsUrl = samlMeta?.sp_acs_url ?? '';
+  const spEntity = samlMeta?.sp_entity_id ?? '';
+  // Provided server-side from API_PUBLIC_URL so the UI doesn't have
+  // to know what the public base looks like.
+  const metadataUrl = samlMeta?.sp_metadata_url ?? '';
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-lg font-semibold text-foreground">SSO</h2>
+
+      <div className="rounded-md border border-border p-4">
+        <p className="text-sm font-medium">Active protocol</p>
+        <p className="mt-1 text-xs text-neutral-500">
+          A tenant can use OIDC <em>or</em> SAML, never both at once.
+          Switching requires the target protocol to already be configured
+          below.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span
+            className={cn(
+              'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
+              activeProtocol === 'oidc' &&
+                'bg-primary-100 text-primary-800 dark:bg-primary-900/30 dark:text-primary-300',
+              activeProtocol === 'saml' &&
+                'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300',
+              activeProtocol === 'none' &&
+                'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-400'
+            )}
+          >
+            {activeProtocol === 'none' ? 'Disabled' : activeProtocol.toUpperCase()}
+          </span>
+          {activeProtocol !== 'oidc' && (
+            <button
+              type="button"
+              disabled={switching || !oidcEnabled}
+              onClick={() => onSwitch('oidc')}
+              className="rounded-md border border-border px-3 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              title={oidcEnabled ? 'Switch to OIDC' : 'Configure OIDC first'}
+            >
+              Use OIDC
+            </button>
+          )}
+          {activeProtocol !== 'saml' && (
+            <button
+              type="button"
+              disabled={switching || !samlEnabled}
+              onClick={() => onSwitch('saml')}
+              className="rounded-md border border-border px-3 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              title={samlEnabled ? 'Switch to SAML' : 'Configure SAML first'}
+            >
+              Use SAML
+            </button>
+          )}
+          {activeProtocol !== 'none' && (
+            <button
+              type="button"
+              disabled={switching}
+              onClick={() => onSwitch('none')}
+              className="rounded-md border border-border px-3 py-1 text-xs font-medium text-neutral-600 hover:bg-muted disabled:opacity-50"
+            >
+              Disable SSO
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="border-b border-border">
+        <nav className="-mb-px flex gap-4">
+          {(['oidc', 'saml'] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setView(p)}
+              className={cn(
+                'border-b-2 px-3 py-2 text-sm font-medium',
+                view === p
+                  ? 'border-primary-500 text-primary-600'
+                  : 'border-transparent text-neutral-500 hover:text-foreground'
+              )}
+            >
+              {p.toUpperCase()}
+              {p === activeProtocol && (
+                <span className="ml-2 rounded-full bg-primary-100 px-1.5 py-0.5 text-[10px] text-primary-800 dark:bg-primary-900/30 dark:text-primary-300">
+                  active
+                </span>
+              )}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {view === 'oidc' && (
+        <div className="grid max-w-xl gap-4">
+          <p className="text-xs text-neutral-500">
+            PATCH /api/v1/tenants/&#123;id&#125;/sso-config
+          </p>
+          <FormField label="Issuer (URL)">
+            <input
+              className={inputCls}
+              value={ssoForm.issuer}
+              onChange={(e) =>
+                setSsoForm((f) => ({ ...f, issuer: e.target.value }))
+              }
+            />
+          </FormField>
+          <FormField label="Client ID">
+            <input
+              className={inputCls}
+              value={ssoForm.client_id}
+              onChange={(e) =>
+                setSsoForm((f) => ({ ...f, client_id: e.target.value }))
+              }
+            />
+          </FormField>
+          <FormField label="Client secret">
+            <input
+              type="password"
+              className={inputCls}
+              value={ssoForm.client_secret}
+              onChange={(e) =>
+                setSsoForm((f) => ({ ...f, client_secret: e.target.value }))
+              }
+              autoComplete="new-password"
+            />
+          </FormField>
+          <FormField label="Allowed domains (comma-separated)">
+            <input
+              className={inputCls}
+              value={ssoForm.allowed_domains}
+              onChange={(e) =>
+                setSsoForm((f) => ({ ...f, allowed_domains: e.target.value }))
+              }
+              placeholder="example.com, app.example.com"
+            />
+          </FormField>
+          <button
+            type="button"
+            disabled={savingOidc}
+            onClick={saveOidc}
+            className="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
+          >
+            {savingOidc ? 'Saving…' : 'Save OIDC config'}
+          </button>
+        </div>
+      )}
+
+      {view === 'saml' && (
+        <div className="space-y-6">
+          <div className="rounded-md border border-dashed border-border bg-muted/30 p-4 text-sm">
+            <p className="font-medium">Service Provider URLs</p>
+            <p className="mt-1 text-xs text-neutral-500">
+              Hand these to your IdP admin when configuring the SAML
+              application.
+            </p>
+            <dl className="mt-3 grid gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <dt className="w-32 text-neutral-500">ACS URL</dt>
+                <dd className="break-all font-mono">{acsUrl || '—'}</dd>
+                {acsUrl && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(acsUrl)}
+                    className="rounded border border-border px-2 py-0.5 text-[10px] hover:bg-muted"
+                  >
+                    Copy
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <dt className="w-32 text-neutral-500">SP Entity ID</dt>
+                <dd className="break-all font-mono">{spEntity || '—'}</dd>
+                {spEntity && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(spEntity)}
+                    className="rounded border border-border px-2 py-0.5 text-[10px] hover:bg-muted"
+                  >
+                    Copy
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <dt className="w-32 text-neutral-500">SP Metadata</dt>
+                <dd>
+                  {metadataUrl ? (
+                    <a
+                      href={metadataUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-primary-600 underline hover:text-primary-700"
+                    >
+                      Download XML
+                    </a>
+                  ) : (
+                    <span className="text-neutral-500">
+                      Save SAML config first
+                    </span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="grid max-w-xl gap-4">
+            <p className="text-xs text-neutral-500">
+              PATCH /api/v1/tenants/&#123;id&#125;/sso-config/saml
+            </p>
+            <FormField label="IdP Entity ID">
+              <input
+                className={inputCls}
+                value={samlForm.idp_entity_id}
+                onChange={(e) =>
+                  setSamlForm((f) => ({ ...f, idp_entity_id: e.target.value }))
+                }
+                placeholder="http://www.okta.com/exk..."
+              />
+            </FormField>
+            <FormField label="IdP Single Sign-On URL">
+              <input
+                className={inputCls}
+                value={samlForm.idp_sso_url}
+                onChange={(e) =>
+                  setSamlForm((f) => ({ ...f, idp_sso_url: e.target.value }))
+                }
+                placeholder="https://yourorg.okta.com/app/.../sso/saml"
+              />
+            </FormField>
+            <FormField label="IdP X.509 Certificate (PEM)">
+              <textarea
+                className={inputCls + ' h-32 font-mono text-xs'}
+                value={samlForm.idp_x509_cert}
+                onChange={(e) =>
+                  setSamlForm((f) => ({ ...f, idp_x509_cert: e.target.value }))
+                }
+                placeholder={
+                  samlMeta?.idp_cert_present
+                    ? '••••• (cert configured — paste a new value to replace)'
+                    : '-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'
+                }
+              />
+            </FormField>
+            <FormField label="IdP Single Logout URL (optional)">
+              <input
+                className={inputCls}
+                value={samlForm.idp_slo_url}
+                onChange={(e) =>
+                  setSamlForm((f) => ({ ...f, idp_slo_url: e.target.value }))
+                }
+              />
+            </FormField>
+
+            <div className="rounded-md border border-border p-3">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={samlForm.sign_authn_requests}
+                  onChange={(e) =>
+                    setSamlForm((f) => ({
+                      ...f,
+                      sign_authn_requests: e.target.checked,
+                    }))
+                  }
+                />
+                Sign AuthnRequests (requires SP cert + key below)
+              </label>
+              {samlForm.sign_authn_requests && (
+                <div className="mt-3 grid gap-3">
+                  <FormField label="SP X.509 Certificate (PEM)">
+                    <textarea
+                      className={inputCls + ' h-24 font-mono text-xs'}
+                      value={samlForm.sp_x509_cert}
+                      onChange={(e) =>
+                        setSamlForm((f) => ({
+                          ...f,
+                          sp_x509_cert: e.target.value,
+                        }))
+                      }
+                      placeholder={
+                        samlMeta?.sp_cert_present
+                          ? '••••• (configured — paste a new value to replace)'
+                          : '-----BEGIN CERTIFICATE-----\n...'
+                      }
+                    />
+                  </FormField>
+                  <FormField label="SP Private Key (PEM)">
+                    <textarea
+                      className={inputCls + ' h-24 font-mono text-xs'}
+                      value={samlForm.sp_private_key}
+                      onChange={(e) =>
+                        setSamlForm((f) => ({
+                          ...f,
+                          sp_private_key: e.target.value,
+                        }))
+                      }
+                      placeholder={
+                        samlMeta?.sp_key_present
+                          ? '••••• (configured — paste a new value to replace)'
+                          : '-----BEGIN PRIVATE KEY-----\n...'
+                      }
+                    />
+                  </FormField>
+                </div>
+              )}
+            </div>
+
+            <FormField label="Allowed email domains (comma-separated)">
+              <input
+                className={inputCls}
+                value={samlForm.allowed_domains}
+                onChange={(e) =>
+                  setSamlForm((f) => ({
+                    ...f,
+                    allowed_domains: e.target.value,
+                  }))
+                }
+                placeholder="example.com, app.example.com"
+              />
+            </FormField>
+
+            <div className="rounded-md border border-border p-3 space-y-3">
+              <p className="text-sm font-medium">Attribute mapping</p>
+              <p className="text-xs text-neutral-500">
+                Names of the SAML AttributeStatement fields the IdP sends.
+                Defaults match Okta. ADFS / Azure AD typically use
+                fully-qualified URI names (e.g. http://schemas.xmlsoap.org/...
+                ).
+              </p>
+              <FormField label="Email attribute">
+                <input
+                  className={inputCls}
+                  value={samlForm.email_attribute}
+                  onChange={(e) =>
+                    setSamlForm((f) => ({
+                      ...f,
+                      email_attribute: e.target.value,
+                    }))
+                  }
+                />
+              </FormField>
+              <FormField label="First-name attribute">
+                <input
+                  className={inputCls}
+                  value={samlForm.first_name_attribute}
+                  onChange={(e) =>
+                    setSamlForm((f) => ({
+                      ...f,
+                      first_name_attribute: e.target.value,
+                    }))
+                  }
+                />
+              </FormField>
+              <FormField label="Last-name attribute">
+                <input
+                  className={inputCls}
+                  value={samlForm.last_name_attribute}
+                  onChange={(e) =>
+                    setSamlForm((f) => ({
+                      ...f,
+                      last_name_attribute: e.target.value,
+                    }))
+                  }
+                />
+              </FormField>
+              <FormField label="Group attribute (carries the IdP group memberships)">
+                <input
+                  className={inputCls}
+                  value={samlForm.group_attribute}
+                  onChange={(e) =>
+                    setSamlForm((f) => ({
+                      ...f,
+                      group_attribute: e.target.value,
+                    }))
+                  }
+                />
+              </FormField>
+            </div>
+
+            <FormField label="Owner groups (comma-separated; membership grants is_owner)">
+              <input
+                className={inputCls}
+                value={samlForm.owner_groups}
+                onChange={(e) =>
+                  setSamlForm((f) => ({ ...f, owner_groups: e.target.value }))
+                }
+                placeholder="DCS Owners, DCS Admins"
+              />
+            </FormField>
+            <FormField label="Group → role map (JSON)">
+              <textarea
+                className={inputCls + ' h-24 font-mono text-xs'}
+                value={samlForm.group_role_map}
+                onChange={(e) =>
+                  setSamlForm((f) => ({ ...f, group_role_map: e.target.value }))
+                }
+                placeholder={'{\n  "DCSAdmins": "Admin",\n  "DCSCollectors": "Collector"\n}'}
+              />
+            </FormField>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={samlForm.sync_groups_on_login}
+                onChange={(e) =>
+                  setSamlForm((f) => ({
+                    ...f,
+                    sync_groups_on_login: e.target.checked,
+                  }))
+                }
+              />
+              Sync roles from IdP groups on every login (REPLACE assignments)
+            </label>
+
+            <button
+              type="button"
+              disabled={savingSaml}
+              onClick={saveSaml}
+              className="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
+            >
+              {savingSaml ? 'Saving…' : 'Save SAML config'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

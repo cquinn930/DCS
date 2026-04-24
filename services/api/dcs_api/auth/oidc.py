@@ -3,7 +3,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlencode
 
 import httpx
@@ -16,6 +16,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dcs_api.models.tenant import Role, Tenant, User, UserRole
 
 logger = logging.getLogger("dcs_api.auth.oidc")
+
+
+@runtime_checkable
+class SSOClaimMapping(Protocol):
+    """Subset of fields shared between OIDCConfig and SAMLConfig.
+
+    `provision_or_update_user` uses only these attributes when syncing
+    role assignments / is_owner from IdP groups, which lets the same
+    function serve both protocols without copy-paste. Both `OIDCConfig`
+    (this module) and `SAMLConfig` (`auth/saml.py`) satisfy it
+    structurally.
+    """
+
+    group_claim: str
+    group_role_map: dict[str, str]
+    owner_groups: list[str]
+    sync_groups_on_login: bool
 
 
 class OIDCConfig(BaseModel):
@@ -332,7 +349,7 @@ async def _sync_user_roles_from_groups(
     session: AsyncSession,
     user: User,
     groups: list[str],
-    config: "OIDCConfig",
+    config: "SSOClaimMapping",
 ) -> None:
     """Reconcile the user's roles against the IdP group membership.
 
@@ -378,7 +395,7 @@ async def _sync_user_roles_from_groups(
     missing_names = target_role_names - found_names
     if missing_names:
         logger.warning(
-            "OIDC group_role_map references roles missing from tenant %s: %s",
+            "SSO group_role_map references roles missing from tenant %s: %s",
             user.tenant_id,
             sorted(missing_names),
         )
@@ -386,7 +403,7 @@ async def _sync_user_roles_from_groups(
     # Diagnostic value > log noise here; revisit once a global logging
     # config is added.
     logger.warning(
-        "OIDC role sync for user=%s groups=%s -> mapped=%s -> resolved=%s "
+        "SSO role sync for user=%s groups=%s -> mapped=%s -> resolved=%s "
         "(sync_groups_on_login=%s)",
         user.id,
         groups,
@@ -418,9 +435,15 @@ async def provision_or_update_user(
     tenant_id: uuid.UUID,
     userinfo: dict[str, Any],
     idp_provider: str,
-    config: "OIDCConfig | None" = None,
+    config: "SSOClaimMapping | None" = None,
 ) -> User:
-    """JIT-provision (or refresh) a user from OIDC claims.
+    """JIT-provision (or refresh) a user from SSO claims (OIDC or SAML).
+
+    `userinfo` is shaped like an OIDC userinfo response — `sub`,
+    `email`, `given_name`, `family_name`, optional `name`, and the
+    group-claim key named by ``config.group_claim``. The SAML auth
+    helper is responsible for mapping its raw AttributeStatement onto
+    that shape before calling here.
 
     If ``config`` is supplied, IdP group membership is also synced into
     the user's role assignments and is_owner flag according to
@@ -501,7 +524,7 @@ async def provision_or_update_user(
             await _sync_user_roles_from_groups(session, user, groups, config)
         elif config is not None:
             logger.warning(
-                "OIDC claim %r absent from userinfo for user=%s; "
+                "SSO claim %r absent from userinfo for user=%s; "
                 "leaving is_owner and role assignments untouched",
                 config.group_claim,
                 user.id,
