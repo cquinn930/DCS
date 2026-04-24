@@ -21,6 +21,12 @@ from dcs_api.schemas.sso import (
     SSOProtocolUpdate,
     infer_protocol,
 )
+from dcs_api.schemas.printing import PrintingTenantConfig, PrintingTenantConfigUpdate
+from dcs_api.schemas.scanning import ScanningTenantConfig, ScanningTenantConfigUpdate
+from dcs_api.schemas.telephony import (
+    TelephonyTenantConfig,
+    TelephonyTenantConfigUpdate,
+)
 from dcs_api.schemas.tenant import TenantCreate, TenantResponse, TenantUpdate
 
 settings = get_settings()
@@ -562,3 +568,168 @@ async def update_tenant_saml_config(
     return _saml_response_from_settings(
         saml, sp_acs_default, sp_entity_default, sp_metadata_default
     )
+
+
+# ---------------------------------------------------------------------------
+# Telephony / Print / Scan provider config
+#
+# All three follow the SSO pattern: a single jsonb blob inside
+# tenant.settings.<key>, edited via GET / PATCH on a typed schema.
+# Owners and Admins (with the matching MANAGE_* permission) can edit;
+# non-owners get 403. Read access is broader — anyone in the tenant can
+# read so the UI can render capability-gated controls.
+# ---------------------------------------------------------------------------
+
+
+def _ensure_can_edit(user: CurrentUser, tenant_id: uuid.UUID, perm: str) -> None:
+    """Centralized check matching the SSO endpoints' authorization rule."""
+    if tenant_id != user.tenant_id and not user.is_master:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied",
+        )
+    if tenant_id == user.tenant_id and not (user.is_owner or user.has_permission(perm)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Owner or matching manage permission required",
+        )
+
+
+async def _load_tenant_or_404(session: AsyncSession, tenant_id: uuid.UUID) -> Tenant:
+    tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found"
+        )
+    return tenant
+
+
+# --- Telephony --------------------------------------------------------------
+
+
+@router.get("/{tenant_id}/telephony-config", response_model=TelephonyTenantConfig)
+async def get_telephony_config(
+    tenant_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> TelephonyTenantConfig:
+    if tenant_id != user.tenant_id and not user.is_master:
+        raise HTTPException(status_code=403, detail="Access denied")
+    tenant = await _load_tenant_or_404(session, tenant_id)
+    raw = (tenant.settings or {}).get("telephony") or {}
+    try:
+        return TelephonyTenantConfig.model_validate(raw)
+    except ValidationError:
+        return TelephonyTenantConfig()
+
+
+@router.patch("/{tenant_id}/telephony-config", response_model=TelephonyTenantConfig)
+async def update_telephony_config(
+    tenant_id: uuid.UUID,
+    data: TelephonyTenantConfigUpdate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> TelephonyTenantConfig:
+    _ensure_can_edit(user, tenant_id, Permissions.MANAGE_TELEPHONY)
+    tenant = await _load_tenant_or_404(session, tenant_id)
+
+    base_settings = dict(tenant.settings) if tenant.settings else {}
+    current = dict(base_settings.get("telephony") or {})
+    for key, value in data.model_dump(exclude_unset=True, mode="json").items():
+        current[key] = value
+    base_settings["telephony"] = current
+    tenant.settings = base_settings
+    await session.flush()
+
+    try:
+        return TelephonyTenantConfig.model_validate(current)
+    except ValidationError:
+        return TelephonyTenantConfig()
+
+
+# --- Printing ---------------------------------------------------------------
+
+
+@router.get("/{tenant_id}/printing-config", response_model=PrintingTenantConfig)
+async def get_printing_config(
+    tenant_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> PrintingTenantConfig:
+    if tenant_id != user.tenant_id and not user.is_master:
+        raise HTTPException(status_code=403, detail="Access denied")
+    tenant = await _load_tenant_or_404(session, tenant_id)
+    raw = (tenant.settings or {}).get("printing") or {}
+    try:
+        return PrintingTenantConfig.model_validate(raw)
+    except ValidationError:
+        return PrintingTenantConfig()
+
+
+@router.patch("/{tenant_id}/printing-config", response_model=PrintingTenantConfig)
+async def update_printing_config(
+    tenant_id: uuid.UUID,
+    data: PrintingTenantConfigUpdate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> PrintingTenantConfig:
+    _ensure_can_edit(user, tenant_id, Permissions.MANAGE_PRINTING)
+    tenant = await _load_tenant_or_404(session, tenant_id)
+
+    base_settings = dict(tenant.settings) if tenant.settings else {}
+    current = dict(base_settings.get("printing") or {})
+    for key, value in data.model_dump(exclude_unset=True, mode="json").items():
+        current[key] = value
+    base_settings["printing"] = current
+    tenant.settings = base_settings
+    await session.flush()
+
+    try:
+        return PrintingTenantConfig.model_validate(current)
+    except ValidationError:
+        return PrintingTenantConfig()
+
+
+# --- Scanning ---------------------------------------------------------------
+
+
+@router.get("/{tenant_id}/scanning-config", response_model=ScanningTenantConfig)
+async def get_scanning_config(
+    tenant_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> ScanningTenantConfig:
+    if tenant_id != user.tenant_id and not user.is_master:
+        raise HTTPException(status_code=403, detail="Access denied")
+    tenant = await _load_tenant_or_404(session, tenant_id)
+    raw = (tenant.settings or {}).get("scanning") or {}
+    try:
+        return ScanningTenantConfig.model_validate(raw)
+    except ValidationError:
+        return ScanningTenantConfig()
+
+
+@router.patch("/{tenant_id}/scanning-config", response_model=ScanningTenantConfig)
+async def update_scanning_config(
+    tenant_id: uuid.UUID,
+    data: ScanningTenantConfigUpdate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> ScanningTenantConfig:
+    _ensure_can_edit(user, tenant_id, Permissions.MANAGE_SCANNING)
+    tenant = await _load_tenant_or_404(session, tenant_id)
+
+    base_settings = dict(tenant.settings) if tenant.settings else {}
+    current = dict(base_settings.get("scanning") or {})
+    for key, value in data.model_dump(exclude_unset=True, mode="json").items():
+        current[key] = value
+    base_settings["scanning"] = current
+    tenant.settings = base_settings
+    await session.flush()
+
+    try:
+        return ScanningTenantConfig.model_validate(current)
+    except ValidationError:
+        return ScanningTenantConfig()

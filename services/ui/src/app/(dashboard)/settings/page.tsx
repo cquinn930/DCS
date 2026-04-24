@@ -8,11 +8,19 @@ import {
   Bell,
   Database,
   Key,
+  Phone,
   Plug,
+  Printer as PrinterIcon,
+  ScanLine,
   Shield,
   Sparkles,
   Users,
 } from 'lucide-react';
+import {
+  PrintingTab,
+  ScanningTab,
+  TelephonyTab,
+} from '@/components/settings/integrations-tabs';
 import { PageHeader } from '@/components/shared/page-header';
 import { SearchBar } from '@/components/shared/search-bar';
 import { DataTable } from '@/components/shared/data-table';
@@ -100,6 +108,9 @@ const tabs = [
   { id: 'security', name: 'Security', icon: Shield },
   { id: 'sso', name: 'SSO', icon: Key },
   { id: 'ai', name: 'AI Assistant', icon: Sparkles },
+  { id: 'telephony', name: 'Telephony', icon: Phone },
+  { id: 'printing', name: 'Print & Mail', icon: PrinterIcon },
+  { id: 'scanning', name: 'Scan & Capture', icon: ScanLine },
   { id: 'notifications', name: 'Notifications', icon: Bell },
   { id: 'integrations', name: 'Integrations', icon: Plug },
 ] as const;
@@ -111,8 +122,15 @@ export default function SettingsPage() {
     'general'
   );
 
+  const TENANT_FETCH_TABS: ReadonlyArray<(typeof tabs)[number]['id']> = [
+    'general',
+    'ai',
+    'telephony',
+    'printing',
+    'scanning',
+  ];
   const { data: tenant, mutate: mutTenant } = useSWR(
-    token && activeTab === 'general' ? ['tenant-current', token] : null,
+    token && TENANT_FETCH_TABS.includes(activeTab) ? ['tenant-current', token] : null,
     async () => {
       const { data } = await apiClient.get<Tenant>('/api/v1/tenants/current');
       return data;
@@ -684,6 +702,18 @@ export default function SettingsPage() {
 
           {activeTab === 'ai' && (
             <AiConfigTab tenantId={tenant?.id} settings={tenant?.settings} onSave={() => mutTenant()} />
+          )}
+
+          {activeTab === 'telephony' && (
+            <TelephonyTab tenantId={tenant?.id} />
+          )}
+
+          {activeTab === 'printing' && (
+            <PrintingTab tenantId={tenant?.id} />
+          )}
+
+          {activeTab === 'scanning' && (
+            <ScanningTab tenantId={tenant?.id} />
           )}
 
           {activeTab === 'notifications' && (

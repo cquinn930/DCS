@@ -363,6 +363,21 @@ class Permissions:
     # Safeguards
     MANAGE_SAFEGUARDS = "safeguards:manage"
 
+    # Telephony
+    MANAGE_TELEPHONY = "telephony:manage"
+    USE_TELEPHONY = "telephony:use"
+
+    # Print & Mail
+    MANAGE_PRINTING = "printing:manage"
+    USE_PRINTING = "printing:use"
+
+    # Scan & Capture
+    MANAGE_SCANNING = "scanning:manage"
+    USE_SCANNING = "scanning:use"
+
+    # Checks (point-of-payment scanned checks → trust deposits)
+    HANDLE_CHECKS = "checks:handle"
+
 
 async def get_user_permissions(session: AsyncSession, user_id: uuid.UUID) -> set[str]:
     """Load all permissions for a user based on their roles."""

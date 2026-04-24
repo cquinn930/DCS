@@ -41,6 +41,7 @@ from dcs_api.routers import (
     flash_messages,
     health,
     imports,
+    intake,
     integrations,
     judgments,
     litigation,
@@ -50,14 +51,17 @@ from dcs_api.routers import (
     payment_plans,
     payments,
     performance,
+    printing,
     remittance,
     reports,
     reviews,
     safeguards,
+    scanning,
     scripting,
     skip_trace,
     subplans,
     tags,
+    telephony,
     tenants,
     trends,
     trust,
@@ -238,6 +242,10 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(tenants.router, prefix="/api/v1/tenants", tags=["Tenants"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
 app.include_router(master.router, prefix="/api/v1/master", tags=["Master"])
+# Public intake: MFP scan-to-cloud, telephony provider webhooks, print
+# bureau status callbacks. Authenticated per-endpoint via intake tokens
+# / signed webhooks, NOT via tenant JWT.
+app.include_router(intake.router, prefix="/api/v1/intake", tags=["Intake"])
 
 # 2. Operational (master must impersonate to reach these)
 app.include_router(consumers.router, prefix="/api/v1/consumers", tags=["Consumers"], dependencies=OPERATIONAL_GUARD)
@@ -283,6 +291,9 @@ app.include_router(trends.router, prefix="/api/v1/trends", tags=["Trends"], depe
 app.include_router(safeguards.router, prefix="/api/v1/safeguards", tags=["Safeguards"], dependencies=OPERATIONAL_GUARD)
 app.include_router(client_portal.router, prefix="/api/v1/client-portal", tags=["Client portal"], dependencies=OPERATIONAL_GUARD)
 app.include_router(doc_drafts.router, prefix="/api/v1/doc-drafts", tags=["Document drafts"], dependencies=OPERATIONAL_GUARD)
+app.include_router(telephony.router, prefix="/api/v1/telephony", tags=["Telephony"], dependencies=OPERATIONAL_GUARD)
+app.include_router(printing.router, prefix="/api/v1/printing", tags=["Print & Mail"], dependencies=OPERATIONAL_GUARD)
+app.include_router(scanning.router, prefix="/api/v1/scanning", tags=["Scan & Capture"], dependencies=OPERATIONAL_GUARD)
 
 
 DCS_SYSTEM_PROMPT = """You are a DCS (Debt Collection System) assistant. You help users create:

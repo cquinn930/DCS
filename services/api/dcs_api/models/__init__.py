@@ -178,6 +178,21 @@ from dcs_api.models.client_portal import (
     ClientPortalSession,
     ClientPortalUser,
 )
+from dcs_api.models.telephony import (
+    Call,
+    CallDisposition,
+    CallEvent,
+    PhoneNumber,
+)
+from dcs_api.models.printing import (
+    Printer,
+    PrintJob,
+)
+from dcs_api.models.scanning import (
+    Check,
+    ScanJob,
+    Scanner,
+)
 
 __all__ = [
     # Tenant
@@ -243,4 +258,10 @@ __all__ = [
     "TransactionLimit", "FinancialNote", "TemporaryHold",
     # Client Portal
     "ClientPortalUser", "ClientPortalSession",
+    # Telephony
+    "Call", "CallEvent", "CallDisposition", "PhoneNumber",
+    # Printing
+    "Printer", "PrintJob",
+    # Scanning
+    "Scanner", "ScanJob", "Check",
 ]
