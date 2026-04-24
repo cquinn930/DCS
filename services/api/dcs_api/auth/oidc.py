@@ -183,27 +183,45 @@ async def resolve_oidc_user_claims(
     token_response: dict[str, Any],
     discovery: dict[str, Any],
 ) -> dict[str, Any]:
-    access = token_response.get("access_token")
-    if isinstance(access, str) and discovery.get("userinfo_endpoint"):
-        try:
-            claims = await get_userinfo(access, discovery)
-            if claims.get("sub"):
-                return claims
-        except HTTPException:
-            pass
+    """Combine OIDC claims from the ID token and the userinfo endpoint.
+
+    Some IdPs (notably Okta's Org Authorization Server with the legacy
+    Group Claims filter) only emit ``groups`` in the ID token, never in
+    the userinfo response. Other IdPs only fully populate the userinfo
+    response. Merge both, with userinfo taking precedence on overlap so
+    that the most recent profile data wins for things like email/name
+    while ID-token-only claims (groups, custom app claims) still flow
+    through.
+    """
+    id_token_claims: dict[str, Any] = {}
     id_token = token_response.get("id_token")
     if isinstance(id_token, str) and id_token:
         try:
-            return jose_jwt.get_unverified_claims(id_token)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Could not parse id_token",
-            ) from e
-    raise HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        detail="Could not obtain OIDC user profile",
-    )
+            id_token_claims = jose_jwt.get_unverified_claims(id_token) or {}
+        except Exception:
+            id_token_claims = {}
+
+    userinfo_claims: dict[str, Any] = {}
+    access = token_response.get("access_token")
+    if isinstance(access, str) and discovery.get("userinfo_endpoint"):
+        try:
+            userinfo_claims = await get_userinfo(access, discovery) or {}
+        except HTTPException:
+            userinfo_claims = {}
+
+    if not id_token_claims and not userinfo_claims:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not obtain OIDC user profile",
+        )
+
+    merged: dict[str, Any] = {**id_token_claims, **userinfo_claims}
+    if not merged.get("sub"):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="OIDC claims missing sub",
+        )
+    return merged
 
 
 def build_authorization_url(config: OIDCConfig, discovery: dict[str, Any], state: str) -> str:
@@ -387,9 +405,16 @@ async def provision_or_update_user(
         last_name = parts[1] if len(parts) > 1 else None
 
     # Extract IdP groups once so we can apply them consistently to both
-    # the create and update branches below.
+    # the create and update branches below. ``groups_claim_present``
+    # records whether the IdP actually returned the configured claim
+    # key (even as an empty list) -- which is different from the claim
+    # being absent entirely. We only mutate is_owner / role assignments
+    # when the IdP actively asserted something, so a misconfigured
+    # Okta application can't silently demote an admin.
     groups: list[str] = []
+    groups_claim_present = False
     if config is not None:
+        groups_claim_present = config.group_claim in userinfo
         groups = _extract_groups(userinfo, config.group_claim)
 
     now = datetime.now(timezone.utc)
@@ -405,15 +430,27 @@ async def provision_or_update_user(
         user.failed_login_attempts = 0
         user.locked_until = None
 
-        if config is not None:
+        if config is not None and groups_claim_present:
             # Owner flag is mirrored from group membership when the
             # tenant configures owner_groups. Empty owner_groups list
             # means "do not touch is_owner via SSO" -- leaves manual
             # assignments alone. This is intentional: a typo in the
             # owner group name should not silently demote everyone.
+            #
+            # We also gate on ``groups_claim_present`` so that an IdP
+            # that simply isn't sending the groups claim (e.g. Okta
+            # app missing the Group Claims filter) doesn't demote the
+            # user to is_owner=False on every login.
             if config.owner_groups:
                 user.is_owner = any(g in groups for g in config.owner_groups)
             await _sync_user_roles_from_groups(session, user, groups, config)
+        elif config is not None:
+            logger.warning(
+                "OIDC claim %r absent from userinfo for user=%s; "
+                "leaving is_owner and role assignments untouched",
+                config.group_claim,
+                user.id,
+            )
 
         await session.flush()
         return user
@@ -428,7 +465,7 @@ async def provision_or_update_user(
         last_name=last_name,
         is_active=True,
         is_owner=bool(
-            config and config.owner_groups
+            config and groups_claim_present and config.owner_groups
             and any(g in groups for g in config.owner_groups),
         ),
         is_master=False,
@@ -439,7 +476,7 @@ async def provision_or_update_user(
     session.add(user)
     await session.flush()  # need user.id before we can assign roles
 
-    if config is not None:
+    if config is not None and groups_claim_present:
         await _sync_user_roles_from_groups(session, user, groups, config)
         await session.flush()
 
