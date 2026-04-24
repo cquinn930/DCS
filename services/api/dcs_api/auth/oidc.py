@@ -1,5 +1,6 @@
 """OIDC client and JIT user provisioning."""
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dcs_api.models.tenant import Role, Tenant, User, UserRole
+
+logger = logging.getLogger("dcs_api.auth.oidc")
 
 
 class OIDCConfig(BaseModel):
@@ -284,8 +287,8 @@ async def _sync_user_roles_from_groups(
             target_role_names.add(mapped)
 
     # Resolve role names -> Role rows scoped to this tenant. Names not
-    # present in the roles table are dropped (logged via warning would
-    # be ideal, but logging infra varies; keep it silent for now).
+    # present in the roles table are dropped (and logged) so a typo in
+    # the mapping or a missing seed becomes visible in journalctl.
     if target_role_names:
         rows = await session.execute(
             select(Role).where(
@@ -297,6 +300,24 @@ async def _sync_user_roles_from_groups(
     else:
         target_roles = []
     target_role_ids = {r.id for r in target_roles}
+
+    found_names = {r.name for r in target_roles}
+    missing_names = target_role_names - found_names
+    if missing_names:
+        logger.warning(
+            "OIDC group_role_map references roles missing from tenant %s: %s",
+            user.tenant_id,
+            sorted(missing_names),
+        )
+    logger.info(
+        "OIDC role sync for user=%s groups=%s -> mapped=%s -> resolved=%s "
+        "(sync_groups_on_login=%s)",
+        user.id,
+        groups,
+        sorted(target_role_names),
+        sorted(found_names),
+        config.sync_groups_on_login,
+    )
 
     # Current assignments
     current_rows = await session.execute(

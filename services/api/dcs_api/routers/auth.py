@@ -3,6 +3,7 @@
 import base64
 import binascii
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -33,6 +34,7 @@ from dcs_api.schemas.auth import LoginRequest, LoginResponse, RefreshRequest, To
 
 router = APIRouter()
 settings = get_settings()
+logger = logging.getLogger("dcs_api.auth")
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -229,6 +231,18 @@ async def sso_callback(
     discovery = await discover_oidc(config.issuer)
     tokens = await exchange_code(config, code, discovery)
     userinfo = await resolve_oidc_user_claims(tokens, discovery)
+
+    # Visibility for SSO troubleshooting: which OIDC claims arrived and,
+    # specifically, what the configured group_claim returned. We log only
+    # the keys + the groups list, never the raw token, to avoid leaking
+    # PII or anything sensitive into journalctl.
+    logger.info(
+        "SSO callback claims for tenant=%s claim_keys=%s %s=%r",
+        tenant_id,
+        sorted(userinfo.keys()),
+        config.group_claim,
+        userinfo.get(config.group_claim),
+    )
 
     email = userinfo.get("email")
     if isinstance(email, str) and not email_domain_allowed(
