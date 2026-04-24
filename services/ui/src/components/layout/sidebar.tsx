@@ -266,7 +266,19 @@ export function Sidebar() {
                 {user?.email ?? '—'}
               </p>
               <p className="text-xs text-neutral-500 truncate mt-0.5">
-                {user?.roles?.join(', ') || 'User'}
+                {(() => {
+                  // Show the most privileged label first so an Owner who
+                  // hasn't been assigned an explicit role still reads as
+                  // "Owner" instead of falling through to "User".
+                  const roleLabels = user?.roles ?? [];
+                  if (user?.isMaster && !user?.actingAsMaster) return 'Master';
+                  if (user?.isOwner) {
+                    return roleLabels.length
+                      ? `Owner · ${roleLabels.join(', ')}`
+                      : 'Owner';
+                  }
+                  return roleLabels.join(', ') || 'User';
+                })()}
               </p>
             </div>
             <button

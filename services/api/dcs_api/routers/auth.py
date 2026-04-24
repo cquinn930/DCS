@@ -482,7 +482,12 @@ async def sso_start(
                 detail="SAML is not configured for this tenant",
             )
         next_ok = _validate_post_login_url(next, settings.cors_origins)
-        location = build_saml_login_redirect(config, request, relay_state=next_ok or "/")
+        # Only forward a RelayState when the caller actually supplied
+        # ?next=. A default like "/" round-trips through the IdP and
+        # then fails our post-login URL validator (which expects a
+        # full base URL from cors_origins), surfacing as a confusing
+        # 400 "Redirect URL is not allowed" on the ACS bounce.
+        location = build_saml_login_redirect(config, request, relay_state=next_ok)
         return RedirectResponse(url=location, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
     # Default and explicit "oidc" both fall through to OIDC for

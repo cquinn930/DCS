@@ -229,7 +229,12 @@ def build_login_redirect(
     auth = OneLogin_Saml2_Auth(saml_request_data, saml_settings)
     # `login()` returns the redirect URL; passing return_to lets us
     # round-trip our `state` value through the IdP via RelayState.
-    return auth.login(return_to=relay_state or "/")
+    # When no relay state is supplied, omit it entirely so the ACS
+    # handler's URL validator (which only accepts full base URLs from
+    # cors_origins) doesn't reject a bare path like "/".
+    if relay_state:
+        return auth.login(return_to=relay_state)
+    return auth.login()
 
 
 def build_sp_metadata(config: SAMLConfig) -> str:
